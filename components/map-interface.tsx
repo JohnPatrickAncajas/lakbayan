@@ -1,11 +1,12 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { MapPin, Settings2, X, Compass, Loader2 } from "lucide-react"
+import { MapPin, Settings2, X, Compass, Loader2, Plus } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { RoutePanel, RouteData, RouteStep } from "@/components/route-panel"
+import { ContributionModal } from "@/components/contribution-modal"
 import "leaflet/dist/leaflet.css"
 
 interface Terminal {
@@ -107,6 +108,7 @@ export function MapInterface() {
   const [isSearching, setIsSearching] = useState(false)
   const [pinningMode, setPinningMode] = useState<'from' | 'to' | null>(null)
   const [showSettings, setShowSettings] = useState(false)
+  const [showContribute, setShowContribute] = useState(false)
   
   const [maxWalkInput, setMaxWalkInput] = useState("2 km")
   const [maxTransfers, setMaxTransfers] = useState(2)
@@ -120,14 +122,20 @@ export function MapInterface() {
   const terminalsDataRef = useRef<APITerminal[]>([])
 
   useEffect(() => {
-    if (mapInstanceRef.current !== null || typeof window === "undefined") return
+    if (typeof window === "undefined") return;
+
+    let isMounted = true;
+
+    if (mapInstanceRef.current) return;
 
     import("leaflet").then((LeafletModule) => {
+      if (!isMounted) return;
+      if (mapInstanceRef.current) return;
+      if (!mapContainerRef.current) return;
+
       const LeafletLib = LeafletModule.default
       setLeaflet(LeafletLib)
 
-      if (!mapContainerRef.current) return
-      
       const newMap = LeafletLib.map(mapContainerRef.current, {
         zoomControl: false,
       }).setView([14.5995, 121.0], 12)
@@ -156,6 +164,7 @@ export function MapInterface() {
     })
 
     return () => {
+      isMounted = false;
       if (mapInstanceRef.current) {
         mapInstanceRef.current.remove()
         mapInstanceRef.current = null
@@ -238,6 +247,21 @@ export function MapInterface() {
         map.off('click', clickHandler)
     }
   }, [map, L, pinningMode])
+
+  const fetchRouteGeometry = async (start: {lat: number, lng: number}, end: {lat: number, lng: number}, profile: 'driving' | 'walking') => {
+      try {
+          const response = await fetch(`https://router.project-osrm.org/route/v1/${profile}/${start.lng},${start.lat};${end.lng},${end.lat}?overview=full&geometries=geojson`);
+          if (!response.ok) return null;
+          const data = await response.json();
+          if (data.routes && data.routes.length > 0) {
+              return data.routes[0].geometry.coordinates.map((xy: any) => [xy[1], xy[0]]);
+          }
+          return null;
+      } catch (e) {
+          console.error("OSRM Fetch Error", e);
+          return null;
+      }
+  }
 
   const fetchInitialDataSafe = async (LeafletLib: any, mapInstance: any) => {
     try {
@@ -324,7 +348,7 @@ export function MapInterface() {
 
     marker.bindPopup(popupContent, { closeButton: false, maxWidth: 260 })
     
-    marker.on('click', (e: any) => {
+    marker.on('click', async (e: any) => {
         LeafletLib.DomEvent.stopPropagation(e);
         if (terminalPreviewRef.current.length > 0) {
             terminalPreviewRef.current.forEach(layer => mapInstance.removeLayer(layer))
@@ -334,17 +358,26 @@ export function MapInterface() {
         const currentTerminal = terminalsDataRef.current.find(item => item.id === t.id)
         if (!currentTerminal) return
 
-        currentTerminal.routes.forEach(r => {
-             if (!r.stops || r.stops.length === 0) return;
+        for (const r of currentTerminal.routes) {
+             if (!r.stops || r.stops.length === 0) continue;
              
              const startCoords: [number, number] = [parseFloat(currentTerminal.latitude), parseFloat(currentTerminal.longitude)]
              const endStop = r.stops[r.stops.length - 1]
              const endCoords: [number, number] = [parseFloat(endStop.latitude), parseFloat(endStop.longitude)]
+             
+             const geometry = await fetchRouteGeometry(
+                 { lat: startCoords[0], lng: startCoords[1] }, 
+                 { lat: endCoords[0], lng: endCoords[1] }, 
+                 'driving'
+             )
 
-             const line = LeafletLib.polyline([startCoords, endCoords], { color: "#3b82f6", weight: 2, dashArray: "5, 8", opacity: 0.6 }).addTo(mapInstance)
+             const pathCoords = geometry || [startCoords, endCoords]
+
+             const line = LeafletLib.polyline(pathCoords, { color: "#3b82f6", weight: 3, opacity: 0.7 }).addTo(mapInstance)
              const destMarker = LeafletLib.circleMarker(endCoords, { radius: 4, fillColor: "#3b82f6", color: "#fff", weight: 1, fillOpacity: 1 }).addTo(mapInstance)
+             
              terminalPreviewRef.current.push(line, destMarker)
-        })
+        }
     })
   }
 
@@ -366,21 +399,6 @@ export function MapInterface() {
     } catch {
       return null
     }
-  }
-
-  const fetchRouteGeometry = async (start: {lat: number, lng: number}, end: {lat: number, lng: number}, profile: 'driving' | 'walking') => {
-      try {
-          const response = await fetch(`https://router.project-osrm.org/route/v1/${profile}/${start.lng},${start.lat};${end.lng},${end.lat}?overview=full&geometries=geojson`);
-          if (!response.ok) return null;
-          const data = await response.json();
-          if (data.routes && data.routes.length > 0) {
-              return data.routes[0].geometry.coordinates.map((xy: any) => [xy[1], xy[0]]);
-          }
-          return null;
-      } catch (e) {
-          console.error("OSRM Fetch Error", e);
-          return null;
-      }
   }
 
   const handleSearch = async () => {
@@ -654,7 +672,7 @@ export function MapInterface() {
                     onClick={() => setPinningMode(pinningMode === 'to' ? null : 'to')}
                     disabled={!ready}
                   >
-                     <MapPin className="w-4 h-4" />
+                      <MapPin className="w-4 h-4" />
                   </Button>
                </div>
             </div>
@@ -719,7 +737,20 @@ export function MapInterface() {
         <Button size="icon" className="w-10 h-10 md:w-12 md:h-12 rounded-full shadow-xl bg-white text-slate-700 hover:bg-slate-50 border border-slate-100" onClick={handleRecenter}>
             <Compass className="w-5 h-5" />
         </Button>
+        <Button 
+          size="icon" 
+          className="w-10 h-10 md:w-12 md:h-12 rounded-full shadow-xl bg-blue-600 text-white hover:bg-blue-700 border border-blue-500"
+          onClick={() => setShowContribute(true)}
+        >
+            <Plus className="w-5 h-5" />
+        </Button>
       </div>
+
+      <ContributionModal 
+        isOpen={showContribute} 
+        onClose={() => setShowContribute(false)}
+        pinnedLocation={pinnedStart || pinnedEnd}
+      />
 
       {selectedRoute && <RoutePanel route={selectedRoute} onClose={() => setSelectedRoute(null)} onStepClick={() => {}}/>}
       
