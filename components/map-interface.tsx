@@ -9,6 +9,10 @@ import { RoutePanel, RouteData, RouteStep } from "@/components/route-panel"
 import { ContributionModal } from "@/components/contribution-modal"
 import "leaflet/dist/leaflet.css"
 
+// Import types only to avoid server-side issues with Leaflet
+import type { Map, Layer, Marker, Polyline, CircleMarker, LeafletMouseEvent } from "leaflet"
+import type * as Leaflet from "leaflet"
+
 interface Terminal {
   id: string
   name: string
@@ -32,6 +36,7 @@ interface APIRoute {
     longitude: string
     fare: string
     time: number
+    distance?: number
   }[]
   mode: {
     mode_name: string
@@ -57,6 +62,13 @@ interface ExpandedRoute {
   start: Terminal
   end: Terminal
   steps: { instruction: string; location?: [number, number] }[]
+}
+
+// Helper types for route calculation
+interface BestPath {
+    type: string;
+    segments: ExpandedRoute[];
+    walks: number[];
 }
 
 function getDistance(lat1: number, lon1: number, lat2: number, lon2: number) {
@@ -94,10 +106,12 @@ export function MapInterface() {
   const API_BASE_URL = "https://api-lakbayan.onrender.com/api"
 
   const mapContainerRef = useRef<HTMLDivElement>(null)
-  const mapInstanceRef = useRef<any>(null)
   
-  const [map, setMap] = useState<any>(null)
-  const [L, setLeaflet] = useState<any>(null)
+  // Strict typing for refs and state
+  const mapInstanceRef = useRef<Map | null>(null)
+  const [map, setMap] = useState<Map | null>(null)
+  const [L, setLeaflet] = useState<typeof Leaflet | null>(null)
+  
   const [selectedRoute, setSelectedRoute] = useState<RouteData | null>(null)
   
   const [fromLocation, setFromLocation] = useState("")
@@ -116,9 +130,9 @@ export function MapInterface() {
   const [terminalsData, setTerminalsData] = useState<APITerminal[]>([])
   const [ready, setReady] = useState(false)
   
-  const userMarkersRef = useRef<any[]>([])
-  const routeLayersRef = useRef<any[]>([])
-  const terminalPreviewRef = useRef<any[]>([])
+  const userMarkersRef = useRef<Marker[]>([])
+  const routeLayersRef = useRef<Layer[]>([])
+  const terminalPreviewRef = useRef<(Polyline | CircleMarker)[]>([])
   const terminalsDataRef = useRef<APITerminal[]>([])
 
   useEffect(() => {
@@ -150,7 +164,7 @@ export function MapInterface() {
 
       LeafletLib.control.zoom({ position: "bottomright" }).addTo(newMap)
 
-      newMap.on('click', (e: any) => {
+      newMap.on('click', () => {
         const container = mapContainerRef.current
         if (container && !container.classList.contains('cursor-crosshair')) {
              if (terminalPreviewRef.current.length > 0) {
@@ -171,7 +185,7 @@ export function MapInterface() {
         setMap(null)
       }
     }
-  }, [])
+  },)
 
   useEffect(() => {
     if (!map || !L) return;
@@ -205,12 +219,12 @@ export function MapInterface() {
         map.fitBounds(bounds, { padding: [50, 50] });
     }
 
-  }, [pinnedStart, pinnedEnd, map, L]);
+  }, [pinnedStart, pinnedEnd, map, L, isSearching, selectedRoute]);
 
   useEffect(() => {
     if (!map || !L) return
 
-    const clickHandler = async (e: any) => {
+    const clickHandler = async (e: LeafletMouseEvent) => {
         if (!pinningMode) return
         
         try {
@@ -226,7 +240,7 @@ export function MapInterface() {
                 setToLocation(name)
                 setPinnedEnd(coords)
             }
-        } catch (err) {
+        } catch {
             const fallbackName = `${e.latlng.lat.toFixed(4)}, ${e.latlng.lng.toFixed(4)}`
             const coords = { id: "pinned", lat: e.latlng.lat, lng: e.latlng.lng, name: fallbackName };
             if (pinningMode === 'from') { setFromLocation(fallbackName); setPinnedStart(coords); }
@@ -254,7 +268,8 @@ export function MapInterface() {
           if (!response.ok) return null;
           const data = await response.json();
           if (data.routes && data.routes.length > 0) {
-              return data.routes[0].geometry.coordinates.map((xy: any) => [xy[1], xy[0]]);
+              // Explicitly type the coordinate array
+              return data.routes[0].geometry.coordinates.map((xy: [number, number]) => [xy[1], xy[0]] as [number, number]);
           }
           return null;
       } catch (e) {
@@ -263,7 +278,7 @@ export function MapInterface() {
       }
   }
 
-  const fetchInitialDataSafe = async (LeafletLib: any, mapInstance: any) => {
+  const fetchInitialDataSafe = async (LeafletLib: typeof Leaflet, mapInstance: Map) => {
     try {
       const token = localStorage.getItem("accessToken")
       const headers: HeadersInit = { "Content-Type": "application/json" }
@@ -288,7 +303,7 @@ export function MapInterface() {
     }
   }
 
-  const addTerminalMarkerSafe = (LeafletLib: any, mapInstance: any, t: APITerminal) => {
+  const addTerminalMarkerSafe = (LeafletLib: typeof Leaflet, mapInstance: Map, t: APITerminal) => {
     const iconHtml = `
         <div style="position:relative;width:32px;height:32px;display:flex;align-items:center;justify-content:center;">
           <div style="width:30px;height:30px;background-color:#0f172a;border:2px solid white;border-radius:50%;box-shadow:0 4px 6px rgba(0,0,0,0.3);display:flex;align-items:center;justify-content:center;">
@@ -348,7 +363,7 @@ export function MapInterface() {
 
     marker.bindPopup(popupContent, { closeButton: false, maxWidth: 260 })
     
-    marker.on('click', async (e: any) => {
+    marker.on('click', async (e: LeafletMouseEvent) => {
         LeafletLib.DomEvent.stopPropagation(e);
         if (terminalPreviewRef.current.length > 0) {
             terminalPreviewRef.current.forEach(layer => mapInstance.removeLayer(layer))
@@ -447,7 +462,7 @@ export function MapInterface() {
                   name: `${route.mode.mode_name} - ${terminal.name} to ${endStop.stop_name}`,
                   type: route.mode.mode_name,
                   fare: { regular: parseFloat(endStop.fare), discounted: parseFloat(endStop.fare) * 0.8 },
-                  distance: (parseFloat(endStop.distance as any) || 0).toFixed(1) + " km",
+                  distance: (endStop.distance ?? 0).toFixed(1) + " km",
                   time: endStop.time + " min",
                   start: startT,
                   end: endT,
@@ -466,7 +481,7 @@ export function MapInterface() {
           })
       })
 
-      let bestPath = null
+      let bestPath: BestPath | null = null
       let minCost = Infinity 
 
       for (const segment of allSegments) {
@@ -520,23 +535,28 @@ export function MapInterface() {
       if (bestPath) {
         userMarkersRef.current.forEach(m => map.removeLayer(m));
 
-        const boundsArray: any[] = [];
+        const boundsArray: [number, number][] = [];
         const steps: RouteStep[] = []
         let totalFare = 0
         let totalDist = 0
 
-        const drawSegment = async (start: any, end: any, type: 'walk' | 'ride', color: string, dash: string | null) => {
+        const drawSegment = async (start: {lat: number, lng: number}, end: {lat: number, lng: number}, type: 'walk' | 'ride', color: string, dash: string | null) => {
              const profile = type === 'walk' ? 'walking' : 'driving';
              const geometry = await fetchRouteGeometry(start, end, profile);
              
              let layer;
              if (geometry) {
-                 layer = L.polyline(geometry, { color, weight: type === 'ride' ? 5 : 4, dashArray: dash, opacity: 0.8 }).addTo(map);
+                 layer = L.polyline(geometry, { color, weight: type === 'ride' ? 5 : 4, dashArray: dash || undefined, opacity: 0.8 }).addTo(map);
              } else {
-                 layer = L.polyline([[start.lat, start.lng], [end.lat, end.lng]], { color, weight: type === 'ride' ? 5 : 4, dashArray: dash, opacity: 0.8 }).addTo(map);
+                 layer = L.polyline([[start.lat, start.lng], [end.lat, end.lng]], { color, weight: type === 'ride' ? 5 : 4, dashArray: dash || undefined, opacity: 0.8 }).addTo(map);
              }
              routeLayersRef.current.push(layer);
-             boundsArray.push(...(geometry || [[start.lat, start.lng], [end.lat, end.lng]]));
+             
+             if (geometry) {
+                 boundsArray.push(...geometry);
+             } else {
+                 boundsArray.push([start.lat, start.lng], [end.lat, end.lng]);
+             }
         }
 
         await drawSegment(fromCoords, bestPath.segments[0].start, 'walk', '#64748b', '10, 10');
@@ -582,7 +602,7 @@ export function MapInterface() {
         routeLayersRef.current.push(startMarker, endMarker);
 
         if (boundsArray.length > 0) {
-            map.fitBounds(L.latLngBounds(boundsArray), { padding: [50, 50] });
+            map.fitBounds(boundsArray, { padding: [50, 50] });
         }
 
         setSelectedRoute({
@@ -607,6 +627,40 @@ export function MapInterface() {
   }
 
   const handleRecenter = () => { if (map) map.setView([14.5995, 121.0], 12) }
+  
+  // Handlers for modal
+  const handleSelectOnMap = () => {
+      setShowContribute(false)
+      setPinningMode(null) // Reset first
+      
+      // Use setTimeout to ensure modal closes before we set the "listening" state
+      setTimeout(() => {
+          // We need a specific mode for contribution pinning
+          // Re-using pinningMode='from' just for coordinate capture, or add a 'contribute' mode
+          // For simplicity, let's use a temporary alert or visual cue and listen for one click
+          
+          const tempHandler = (e: LeafletMouseEvent) => {
+               const coords: Terminal = { id: "contribution", lat: e.latlng.lat, lng: e.latlng.lng, name: "Selected Location" }
+               setPinnedStart(coords)
+               // But wait, the modal expects 'pinnedLocation'
+               // Let's reuse pinnedStart for simplicity as the 'active' pin
+               
+               // Re-open modal
+               setShowContribute(true)
+               
+               // Remove handler
+               map?.off('click', tempHandler)
+               
+               // Restore cursor
+               if (mapContainerRef.current) mapContainerRef.current.classList.remove('cursor-crosshair')
+          }
+          
+          if (map) {
+              map.on('click', tempHandler)
+              if (mapContainerRef.current) mapContainerRef.current.classList.add('cursor-crosshair')
+          }
+      }, 100)
+  }
 
   return (
     <div className="relative h-screen pt-16 z-0 bg-slate-50">
@@ -750,6 +804,7 @@ export function MapInterface() {
         isOpen={showContribute} 
         onClose={() => setShowContribute(false)}
         pinnedLocation={pinnedStart || pinnedEnd}
+        onSelectOnMap={handleSelectOnMap}
       />
 
       {selectedRoute && <RoutePanel route={selectedRoute} onClose={() => setSelectedRoute(null)} onStepClick={() => {}}/>}

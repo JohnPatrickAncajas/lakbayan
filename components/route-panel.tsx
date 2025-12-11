@@ -1,6 +1,6 @@
 "use client"
 
-import { X, Clock, DollarSign, Navigation, Share2, MapPin, ArrowRight } from "lucide-react"
+import { X, Clock, Navigation, Share2, MapPin, ArrowRight } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
@@ -31,7 +31,6 @@ export function RoutePanel({ route, onClose, onStepClick }: RoutePanelProps) {
     <div className="fixed inset-x-0 bottom-0 md:top-24 md:right-6 md:left-auto md:bottom-6 md:w-96 z-40 flex flex-col md:h-[calc(100vh-8rem)] animate-in slide-in-from-bottom-10 fade-in duration-300">
       <div className="bg-white/95 backdrop-blur-md md:rounded-2xl rounded-t-2xl shadow-2xl border border-slate-200 flex flex-col h-[75vh] md:h-full overflow-hidden">
         
-        {/* --- Header --- */}
         <div className="p-4 border-b border-slate-100 flex-shrink-0 bg-white/50 backdrop-blur-sm relative z-10">
           <div className="md:hidden w-12 h-1.5 bg-slate-200 rounded-full mx-auto mb-4" />
           
@@ -72,10 +71,8 @@ export function RoutePanel({ route, onClose, onStepClick }: RoutePanelProps) {
           </div>
         </div>
 
-        {/* --- Scrollable Steps --- */}
         <ScrollArea className="flex-1 p-4">
           <div className="space-y-0 relative pb-4">
-            {/* Vertical Line */}
             <div className="absolute left-[19px] top-4 bottom-4 w-[2px] bg-slate-100" />
 
             {route.steps.map((step, index) => {
@@ -91,7 +88,6 @@ export function RoutePanel({ route, onClose, onStepClick }: RoutePanelProps) {
                     step.location ? "hover:bg-slate-50 cursor-pointer active:scale-[0.99]" : ""
                   }`}
                 >
-                  {/* Timeline Dot */}
                   <div className={`relative z-10 w-10 h-10 flex items-center justify-center rounded-full shrink-0 border-4 border-white shadow-sm ${
                     isStart ? 'bg-green-500 text-white' : 
                     isEnd ? 'bg-red-500 text-white' : 
@@ -120,7 +116,6 @@ export function RoutePanel({ route, onClose, onStepClick }: RoutePanelProps) {
           </div>
         </ScrollArea>
 
-        {/* --- Sticky Footer --- */}
         <div className="p-4 border-t border-slate-100 bg-white flex gap-3 shrink-0">
           <Button className="flex-1 bg-slate-900 hover:bg-slate-800 text-white shadow-lg shadow-slate-200" size="lg">
             <Navigation className="w-4 h-4 mr-2" /> Start

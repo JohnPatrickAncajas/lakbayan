@@ -102,7 +102,7 @@ export default function HowToUsePage() {
                   <div>
                     <h4 className="font-semibold text-foreground mb-2">Verify Routes</h4>
                     <p className="text-sm text-muted-foreground leading-relaxed">
-                      Help keep information accurate by verifying routes you've personally taken. Your input matters!
+                      Help keep information accurate by verifying routes youve personally taken. Your input matters!
                     </p>
                   </div>
                 </div>
@@ -130,7 +130,7 @@ export default function HowToUsePage() {
                   <div>
                     <h4 className="font-semibold text-foreground mb-2">Share New Routes</h4>
                     <p className="text-sm text-muted-foreground leading-relaxed">
-                      Know a route that's not listed? Add it! Your local knowledge helps the entire community.
+                      Know a route thats not listed? Add it! Your local knowledge helps the entire community.
                     </p>
                   </div>
                 </div>

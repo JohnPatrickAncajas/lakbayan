@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { X, MapPin, Bus, Loader2, CheckCircle2, AlertCircle } from "lucide-react"
+import { X, Bus, Loader2, CheckCircle2, AlertCircle, MapPin } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -12,9 +12,10 @@ interface ContributionModalProps {
   isOpen: boolean
   onClose: () => void
   pinnedLocation: { lat: number; lng: number; name: string } | null
+  onSelectOnMap: () => void
 }
 
-export function ContributionModal({ isOpen, onClose, pinnedLocation }: ContributionModalProps) {
+export function ContributionModal({ isOpen, onClose, pinnedLocation, onSelectOnMap }: ContributionModalProps) {
   const [activeTab, setActiveTab] = useState<'terminal' | 'route'>('terminal')
   const [isLoading, setIsLoading] = useState(false)
   const [status, setStatus] = useState<'idle' | 'success' | 'error'>('idle')
@@ -87,9 +88,10 @@ export function ContributionModal({ isOpen, onClose, pinnedLocation }: Contribut
         setFormData({ name: "", description: "", city: "1", lat: "", lng: "" })
       }, 2000)
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       setStatus('error')
-      setMessage(error.message)
+      const errorMessage = error instanceof Error ? error.message : 'An error occurred'
+      setMessage(errorMessage)
     } finally {
       setIsLoading(false)
     }
@@ -152,7 +154,10 @@ export function ContributionModal({ isOpen, onClose, pinnedLocation }: Contribut
               </div>
 
               <div className="space-y-2">
-                <Label>Location Coordinates</Label>
+                <div className="flex justify-between items-center">
+                    <Label>Location Coordinates</Label>
+                </div>
+                
                 <div className="grid grid-cols-2 gap-2">
                   <div className="relative">
                     <span className="absolute left-2 top-1/2 -translate-y-1/2 text-xs text-slate-400 font-mono">Lat</span>
@@ -175,12 +180,17 @@ export function ContributionModal({ isOpen, onClose, pinnedLocation }: Contribut
                     />
                   </div>
                 </div>
-                {!pinnedLocation && (
-                  <p className="text-[10px] text-orange-600 flex items-center gap-1">
-                    <AlertCircle className="w-3 h-3"/> 
-                    Tip: Tap a location on the map before opening this.
-                  </p>
-                )}
+
+                <Button 
+                    type="button" 
+                    variant="outline" 
+                    size="sm" 
+                    className="w-full text-blue-600 border-blue-200 hover:bg-blue-50"
+                    onClick={onSelectOnMap}
+                >
+                    <MapPin className="w-4 h-4 mr-2"/>
+                    Tap map to select location
+                </Button>
               </div>
 
               <div className="space-y-2">
