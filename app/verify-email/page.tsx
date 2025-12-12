@@ -15,7 +15,8 @@ export default function VerifyEmailPage() {
       setStatus('error')
       return
     }
-    fetch(`https://api-lakbayan.onrender.com/api/accounts/verify-email/?token=${token}`)
+
+    fetch(`https://lakbayan-backend.onrender.com/api/accounts/verify-email/?token=${token}`)
       .then(res => {
         if (res.ok) setStatus('success')
         else setStatus('error')
@@ -27,6 +28,7 @@ export default function VerifyEmailPage() {
     <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
       <div className="bg-white p-8 rounded-xl shadow-lg max-w-sm w-full text-center space-y-4">
         {status === 'loading' && <Loader2 className="w-12 h-12 animate-spin mx-auto text-blue-600"/>}
+        
         {status === 'success' && (
           <>
             <CheckCircle2 className="w-12 h-12 mx-auto text-green-600"/>
@@ -34,6 +36,7 @@ export default function VerifyEmailPage() {
             <Button onClick={() => router.push('/auth')}>Go to Login</Button>
           </>
         )}
+        
         {status === 'error' && (
           <>
             <XCircle className="w-12 h-12 mx-auto text-red-600"/>
