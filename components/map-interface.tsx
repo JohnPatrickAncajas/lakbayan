@@ -841,7 +841,7 @@ export function MapInterface() {
                                 <p className="text-xs font-semibold text-slate-500">Account</p>
                                 <p className="text-sm font-medium text-slate-900 truncate">{username}</p>
                             </div>
-                            <Link href="/profile" className="flex items-center px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors">
+                            <Link href="/auth" className="flex items-center px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors">
                                 <UserCircle className="w-4 h-4 mr-2" /> Profile
                             </Link>
                             <Link href="/about" className="flex items-center px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 transition-colors">

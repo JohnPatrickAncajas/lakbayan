@@ -11,7 +11,7 @@ export function Navigation() {
   const links = [
     { href: "/", label: "Map", icon: Map },
     { href: "/about", label: "About", icon: Info },
-    { href: "/profile", label: "Profile", icon: UserCircle },
+    { href: "/auth", label: "Profile", icon: UserCircle },
   ]
 
   return (

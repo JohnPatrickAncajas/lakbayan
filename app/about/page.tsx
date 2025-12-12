@@ -81,7 +81,7 @@ export default function AboutPage() {
                   Create Account
                 </Button>
               </Link>
-              <Link href="/profile">
+              <Link href="/auth">
                 <Button className="bg-blue-600 hover:bg-blue-700 text-white">
                   Contribute Now
                 </Button>
