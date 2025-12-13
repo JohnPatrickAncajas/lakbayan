@@ -12,6 +12,7 @@ export default function VerifyEmailPage() {
   const token = rawToken ? decodeURIComponent(rawToken) : null
 
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading')
+  const [debugMsg, setDebugMsg] = useState<string>('')
 
   useEffect(() => {
     if (!token) {
@@ -19,12 +20,34 @@ export default function VerifyEmailPage() {
       return
     }
 
-    fetch(`https://api-lakbayan.onrender.com/api/accounts/verify-email/?token=${token}`)
-      .then(res => {
-        if (res.ok) setStatus('success')
-        else setStatus('error')
-      })
-      .catch(() => setStatus('error'))
+    const attemptVerification = async () => {
+        try {
+            const res1 = await fetch(`https://api-lakbayan.onrender.com/verify-email/${token}/`)
+            if (res1.ok) {
+                setStatus('success')
+                return
+            }
+            const res2 = await fetch(`https://api-lakbayan.onrender.com/api/auth/registration/verify-email/`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ key: token })
+            })
+            
+            if (res2.ok) {
+                setStatus('success')
+                return
+            }
+            
+            setStatus('error')
+            setDebugMsg(`Failed. Server said: ${res1.status} ${res1.statusText}`)
+
+        } catch (err: unknown) {
+            setStatus('error')
+            setDebugMsg(err instanceof Error ? err.message : 'Connection failed')
+        }
+    }
+
+    attemptVerification()
   }, [token])
 
   return (
@@ -45,7 +68,9 @@ export default function VerifyEmailPage() {
           <>
             <XCircle className="w-12 h-12 mx-auto text-red-600"/>
             <h1 className="text-xl font-bold">Verification Failed</h1>
-            <p className="text-sm text-slate-500">Invalid or expired token.</p>
+            <p className="text-xs text-red-500 bg-red-50 p-2 rounded font-mono break-all">
+              {debugMsg || "Invalid or expired token."}
+            </p>
             <Button variant="outline" onClick={() => router.push('/auth')}>Back to Login</Button>
           </>
         )}
