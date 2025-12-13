@@ -22,7 +22,7 @@ export default function VerifyEmailPage() {
     }
 
     const verify = async () => {
-        const allauthUrl = `https://lakbayan-backend.onrender.com/accounts/confirm-email/${fullToken}/`
+        const allauthUrl = `https://api-lakbayan.onrender.com/accounts/confirm-email/${fullToken}/`
 
         try {
             const res = await fetch(allauthUrl, {
