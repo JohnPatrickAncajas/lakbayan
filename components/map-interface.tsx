@@ -984,7 +984,7 @@ export function MapInterface() {
         onSelectOnMap={handleSelectOnMap}
       />
 
-      {selectedRoute && <RoutePanel route={selectedRoute} onClose={() => setSelectedRoute(null)} onStepClick={() => {}}/>}
+      {selectedRoute && <RoutePanel route={selectedRoute} onClose={() => setSelectedRoute(null)}/>}
       
       <div className="absolute bottom-6 left-6 z-[20] bg-white/90 backdrop-blur-sm rounded-lg px-4 py-2 shadow-lg border border-slate-200 hidden md:block">
         <p className="text-xs font-medium text-slate-500 flex items-center gap-3">
