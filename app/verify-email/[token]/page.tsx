@@ -9,66 +9,32 @@ export default function VerifyEmailPage() {
   const router = useRouter()
   
   const rawToken = params?.token as string
-  const fullToken = rawToken ? decodeURIComponent(rawToken) : null
+  const token = rawToken ? decodeURIComponent(rawToken) : null
 
   const [status, setStatus] = useState<'loading' | 'success' | 'error'>('loading')
   const [debugMsg, setDebugMsg] = useState<string>('')
 
   useEffect(() => {
-    if (!fullToken) {
+    if (!token) {
       setStatus('error')
-      setDebugMsg('No token found.')
+      setDebugMsg('No token found')
       return
     }
 
-    const verify = async () => {
-        try {
-            const res1 = await fetch(`https://api-lakbayan.onrender.com/verify-email/${fullToken}/`)
-            if (res1.ok) {
-                setStatus('success')
-                return
-            }
-
-            const parts = fullToken.split(':')
-            if (parts.length >= 2) {
-                const uid = parts[0]
-                const token = parts.slice(1).join(':')
-                
-                const res2 = await fetch('https://api-lakbayan.onrender.com/api/users/activation/', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ uid, token })
-                })
-
-                if (res2.ok) {
-                    setStatus('success')
-                    return
-                }
-            }
-
-            // STRATEGY 3: Standard Allauth (POST with key)
-            const res3 = await fetch('https://api-lakbayan.onrender.com/api/auth/registration/verify-email/', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ key: fullToken })
-            })
-
-            if (res3.ok) {
-                setStatus('success')
-                return
-            }
-
-            const text = await res1.text()
-            throw new Error(`${res1.status} ${res1.statusText}: ${text.slice(0, 50)}...`)
-
-        } catch (err: unknown) {
-            setStatus('error')
-            setDebugMsg(err instanceof Error ? err.message : 'An unknown error occurred')
+    fetch(`https://api-lakbayan.onrender.com/verify-email/?token=${token}`)
+      .then(async res => {
+        if (res.ok) {
+          setStatus('success')
+        } else {
+          setStatus('error')
+          setDebugMsg(`${res.status} ${res.statusText}`)
         }
-    }
-
-    verify()
-  }, [fullToken])
+      })
+      .catch(err => {
+        setStatus('error')
+        setDebugMsg(err.message)
+      })
+  }, [token])
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
@@ -89,7 +55,7 @@ export default function VerifyEmailPage() {
             <XCircle className="w-12 h-12 mx-auto text-red-600"/>
             <h1 className="text-xl font-bold">Verification Failed</h1>
             <p className="text-xs text-red-500 bg-red-50 p-2 rounded font-mono break-all">
-              {debugMsg}
+              {debugMsg || "Invalid or expired token."}
             </p>
             <Button variant="outline" onClick={() => router.push('/auth')}>Back to Login</Button>
           </>
