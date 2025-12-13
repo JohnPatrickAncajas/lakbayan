@@ -648,8 +648,8 @@ export function MapInterface() {
         const totalWalk = d1 + d2;
         
         if (totalWalk <= maxWalkKm) {
-            const timeVal = parseFloat(segment.time);
-            const distVal = parseFloat(segment.distance);
+            const timeVal = Math.abs(parseFloat(segment.time));
+            const distVal = Math.abs(parseFloat(segment.distance));
             const fareVal = segment.fare.regular;
             
             let score = 0;
@@ -674,9 +674,9 @@ export function MapInterface() {
                 const totalWalk = dStart + dTransfer + dEnd;
 
                 if (totalWalk <= maxWalkKm) {
-                    const timeVal = parseFloat(r1.time) + parseFloat(r2.time);
+                    const timeVal = Math.abs(parseFloat(r1.time)) + Math.abs(parseFloat(r2.time));
                     const fareVal = r1.fare.regular + r2.fare.regular;
-                    const distVal = parseFloat(r1.distance) + parseFloat(r2.distance);
+                    const distVal = Math.abs(parseFloat(r1.distance)) + Math.abs(parseFloat(r2.distance));
 
                     let score = 0;
                     if (sortBy === 'time') score = timeVal + (totalWalk * 12);
@@ -697,9 +697,9 @@ export function MapInterface() {
                          const totalWalk3 = dStart + dTransfer + dTransfer2 + dEnd2;
 
                          if (totalWalk3 <= maxWalkKm) {
-                             const timeVal3 = parseFloat(r1.time) + parseFloat(r2.time) + parseFloat(r3.time);
+                             const timeVal3 = Math.abs(parseFloat(r1.time)) + Math.abs(parseFloat(r2.time)) + Math.abs(parseFloat(r3.time));
                              const fareVal3 = r1.fare.regular + r2.fare.regular + r3.fare.regular;
-                             const distVal3 = parseFloat(r1.distance) + parseFloat(r2.distance) + parseFloat(r3.distance);
+                             const distVal3 = Math.abs(parseFloat(r1.distance)) + Math.abs(parseFloat(r2.distance)) + Math.abs(parseFloat(r3.distance));
 
                              let score3 = 0;
                              if (sortBy === 'time') score3 = timeVal3 + (totalWalk3 * 12);
@@ -723,7 +723,9 @@ export function MapInterface() {
         const steps: RouteStep[] = []
         let totalFare = 0
         let totalDist = 0
-
+        let totalTime = 0
+        let totalWalkDistance = 0
+        
         const drawSegment = async (segment: ExpandedRoute | null, start: {lat: number, lng: number}, end: {lat: number, lng: number}, type: 'walk' | 'ride', color: string, dash: string | null) => {
              let geometry: [number, number][] | null = null;
              
@@ -749,14 +751,18 @@ export function MapInterface() {
              }
         }
 
+        // --- Start Walk ---
+        const walk1Dist = bestPath.walks[0];
         await drawSegment(null, fromCoords, bestPath.segments[0].start, 'walk', '#64748b', '10, 10');
-        steps.push({ instruction: `Walk ${bestPath.walks[0].toFixed(1)}km to ${bestPath.segments[0].start.name}` })
-        totalDist += bestPath.walks[0]
+        steps.push({ instruction: `Walk ${walk1Dist.toFixed(1)}km to ${bestPath.segments[0].start.name}` })
+        totalDist += walk1Dist;
+        totalWalkDistance += walk1Dist;
 
         for (let i = 0; i < bestPath.segments.length; i++) {
             const seg = bestPath.segments[i]
             totalFare += seg.fare.regular
-            totalDist += parseFloat(seg.distance)
+            totalDist += Math.abs(parseFloat(seg.distance))
+            totalTime += Math.abs(parseFloat(seg.time))
             steps.push({ instruction: `Ride ${seg.type} (${seg.name})` })
             
             const modeColor = getModeColor(seg.type);
@@ -783,16 +789,19 @@ export function MapInterface() {
                 const transferWalk = bestPath.walks[i+1]
                 const nextSeg = bestPath.segments[i+1]
                 totalDist += transferWalk
+                totalWalkDistance += transferWalk;
                 steps.push({ instruction: `Alight at ${seg.end.name}, Walk ${transferWalk.toFixed(1)}km to ${nextSeg.start.name}` })
                 await drawSegment(null, seg.end, nextSeg.start, 'walk', '#64748b', '10, 10');
             }
         }
 
-        const lastSeg = bestPath.segments[bestPath.segments.length - 1];
+        // --- End Walk ---
         const lastWalk = bestPath.walks[bestPath.walks.length - 1];
+        const lastSeg = bestPath.segments[bestPath.segments.length - 1];
         await drawSegment(null, lastSeg.end, toCoords, 'walk', '#64748b', '10, 10');
         
         totalDist += lastWalk
+        totalWalkDistance += lastWalk;
         steps.push({ instruction: `Alight at ${lastSeg.end.name}, Walk ${lastWalk.toFixed(1)}km to Destination` })
 
         const startMarker = L.marker([fromCoords.lat, fromCoords.lng], {
@@ -809,13 +818,16 @@ export function MapInterface() {
             map.fitBounds(boundsArray, { padding: [50, 50] });
         }
 
+        // Final Time Calculation: Sum of Transit Time + Total Walk Time (12 mins per km)
+        const finalTimeMins = totalTime + Math.round(totalWalkDistance * 12);
+
         setSelectedRoute({
             id: `multi-${bestPath.type}`,
             name: `Trip to ${toLocation.split(',')[0]}`,
             type: `${bestPath.segments.length} Ride(s)`,
             fare: { regular: totalFare, discounted: totalFare * 0.8 },
             distance: `${totalDist.toFixed(1)} km`,
-            time: `${Math.round(bestScore - (totalDist * 10))} min`, 
+            time: `${finalTimeMins} min`, 
             steps: steps
         } as RouteData)
 

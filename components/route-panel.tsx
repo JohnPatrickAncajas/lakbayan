@@ -40,8 +40,11 @@ export function RoutePanel({ route, onClose }: RoutePanelProps) {
   const fareValue = Math.abs(safeParse(route.fare?.regular))
 
   const formattedDuration = useMemo(() => {
-    const hrs = Math.floor(durationValue / 60)
-    const mins = Math.floor(durationValue % 60)
+    // FIX: Apply Math.abs() directly to the value used in duration calculation
+    const durationMins = Math.abs(durationValue);
+    
+    const hrs = Math.floor(durationMins / 60)
+    const mins = Math.floor(durationMins % 60)
     
     if (hrs > 0) return `${hrs} hr ${mins} min`
     return `${mins} min`
