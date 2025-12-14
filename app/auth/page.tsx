@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react"
 import Link from "next/link"
-import { Eye, EyeOff, Loader2, Lock, Mail, User, AlertCircle, CheckCircle2, MapPin, ShieldAlert, LogOut, ArrowRight, Info, FileText, Bus, Waypoints } from "lucide-react"
+import { Eye, EyeOff, Loader2, Lock, Mail, User, AlertCircle, CheckCircle2, MapPin, ShieldAlert, LogOut, ArrowRight, Info, FileText, Bus, Waypoints, Shield, BarChart3, LayoutDashboard, ChevronRight } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -15,6 +15,8 @@ interface UserData {
   username: string
   email: string
   id?: number
+  is_staff?: boolean
+  is_superuser?: boolean
 }
 
 interface TerminalContribution {
@@ -92,19 +94,34 @@ export default function AuthPage() {
 
   const checkAuthStatus = useCallback(async () => {
     const token = localStorage.getItem("accessToken")
+    const storedUserStr = localStorage.getItem("user")
+    
     if (!token) {
       setIsPageLoading(false)
       return
     }
 
     try {
+      let localUser: UserData | null = null
+      if (storedUserStr) {
+         try { localUser = JSON.parse(storedUserStr) } catch {}
+      }
+
       const response = await fetch(`${API_BASE_URL}/email-verification/status/`, {
         headers: { 'Authorization': `Bearer ${token}` }
       })
 
       if (response.ok) {
         const data = await response.json()
-        setUser({ username: data.username, email: data.email || data.primary_email })
+        
+        const updatedUser: UserData = {
+            username: data.username,
+            email: data.email || data.primary_email,
+            is_staff: localUser?.is_staff || false,
+            is_superuser: localUser?.is_superuser || false
+        }
+
+        setUser(updatedUser)
         setIsVerified(data.email_verified)
         setViewState('profile')
         fetchContributions(token)
@@ -171,6 +188,7 @@ export default function AuthPage() {
       localStorage.setItem("user", JSON.stringify(data.user))
 
       if (viewState === 'login') {
+        setUser(data.user)
         checkAuthStatus()
       } else {
         setSuccess("Account created! Please check your email.")
@@ -268,16 +286,59 @@ export default function AuthPage() {
                     </div>
 
                     {viewState === 'profile' && user ? (
-                        <div className="space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
-                            <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 text-center space-y-3">
-                                <div className="w-20 h-20 bg-slate-100 rounded-full mx-auto flex items-center justify-center text-3xl font-bold text-slate-700 border-4 border-white shadow-lg">
+                        <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+                            <div className="bg-white rounded-2xl p-6 shadow-sm border border-slate-100 text-center space-y-4 relative">
+                                <div className="w-24 h-24 bg-slate-100 rounded-full mx-auto flex items-center justify-center text-4xl font-bold text-slate-700 border-4 border-white shadow-lg relative">
                                     {user.username.charAt(0).toUpperCase()}
+                                    {(user.is_staff || user.is_superuser) && (
+                                        <div className="absolute -bottom-2 -right-2 bg-blue-600 rounded-full p-1.5 border-4 border-white">
+                                            <Shield className="w-4 h-4 text-white" />
+                                        </div>
+                                    )}
                                 </div>
                                 <div>
-                                    <h2 className="text-2xl font-bold text-slate-900">Welcome, {user.username}</h2>
-                                    <p className="text-slate-500 font-medium">{user.email}</p>
+                                    <h2 className="text-2xl font-bold text-slate-900 mb-1">{user.username}</h2>
+                                    <p className="text-slate-500 font-medium text-sm">{user.email}</p>
+                                    {(user.is_staff || user.is_superuser) && (
+                                        <div className="mt-2 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">
+                                            Administrator
+                                        </div>
+                                    )}
                                 </div>
                             </div>
+
+                            {(user.is_staff || user.is_superuser) && (
+                                <div 
+                                    onClick={() => router.push('/admin/dashboard')}
+                                    className="bg-slate-900 rounded-xl p-5 shadow-xl relative overflow-hidden group cursor-pointer transition-all hover:scale-[1.02] hover:shadow-2xl border border-slate-800"
+                                >
+                                    <div className="absolute top-0 right-0 w-32 h-32 bg-white/5 rounded-full -mr-10 -mt-10 blur-3xl transition-opacity group-hover:opacity-100 opacity-50"></div>
+                                    
+                                    <div className="relative z-10 flex items-center justify-between">
+                                        <div className="flex items-center gap-4">
+                                            <div className="bg-blue-600/20 p-3 rounded-lg border border-blue-500/30">
+                                                <LayoutDashboard className="w-6 h-6 text-blue-400" />
+                                            </div>
+                                            <div>
+                                                <h3 className="text-white font-bold text-lg">Admin Dashboard</h3>
+                                                <p className="text-slate-400 text-xs mt-0.5 font-medium">Access system analytics & logs</p>
+                                            </div>
+                                        </div>
+                                        <div className="bg-white/5 p-2 rounded-full group-hover:bg-white/10 transition-colors">
+                                            <ChevronRight className="w-5 h-5 text-slate-300" />
+                                        </div>
+                                    </div>
+                                    
+                                    <div className="mt-5 pt-4 border-t border-white/10 flex gap-6">
+                                        <div className="flex items-center gap-2 text-xs text-slate-300 font-medium">
+                                            <BarChart3 className="w-3.5 h-3.5 text-emerald-400" /> Live Analytics
+                                        </div>
+                                        <div className="flex items-center gap-2 text-xs text-slate-300 font-medium">
+                                            <User className="w-3.5 h-3.5 text-blue-400" /> User Management
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
 
                             {!isVerified ? (
                                 <div className="bg-amber-50 border border-amber-200 rounded-xl p-5 space-y-4 shadow-sm">
@@ -295,7 +356,7 @@ export default function AuthPage() {
                                     <Button 
                                         onClick={handleResendVerification} 
                                         disabled={isLoading}
-                                        className="w-full bg-amber-600 hover:bg-amber-700 text-white border-none shadow-none"
+                                        className="w-full bg-amber-600 hover:bg-amber-700 text-white border-none shadow-sm font-medium"
                                     >
                                         {isLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin"/> : <Mail className="w-4 h-4 mr-2"/>}
                                         Resend Verification Email
@@ -303,16 +364,6 @@ export default function AuthPage() {
                                 </div>
                             ) : (
                                 <div className="space-y-6">
-                                    <div className="bg-emerald-50 border border-emerald-100 rounded-xl p-4 flex items-center gap-4 shadow-sm">
-                                        <div className="bg-emerald-100 p-2 rounded-full">
-                                            <CheckCircle2 className="w-5 h-5 text-emerald-600" />
-                                        </div>
-                                        <div>
-                                            <h3 className="font-bold text-emerald-900">Account Verified</h3>
-                                            <p className="text-sm text-emerald-700">You are ready to contribute data.</p>
-                                        </div>
-                                    </div>
-
                                     {contributions && (
                                         <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
                                             <div className="bg-slate-50 p-4 border-b border-slate-200 flex items-center justify-between">
@@ -340,7 +391,7 @@ export default function AuthPage() {
                                                     </button>
                                                 </div>
                                                 
-                                                <ScrollArea className="h-[280px] bg-slate-50/50">
+                                                <ScrollArea className="h-[280px] bg-slate-50/30">
                                                     {activeTab === 'terminals' ? (
                                                         contributions.terminals.data.length > 0 ? (
                                                             <div className="divide-y divide-slate-100">
@@ -439,11 +490,11 @@ export default function AuthPage() {
                                 </Button>
                                 
                                 <div className="grid grid-cols-2 gap-3">
-                                    <Button variant="outline" className="w-full h-11 border-slate-200 hover:bg-slate-50 hover:text-slate-900" onClick={() => router.push('/about')}>
+                                    <Button variant="outline" className="w-full h-11 border-slate-200 hover:bg-slate-50 hover:text-slate-900 font-medium" onClick={() => router.push('/about')}>
                                         About <Info className="w-4 h-4 ml-2" />
                                     </Button>
 
-                                    <Button variant="ghost" className="w-full h-11 text-red-600 hover:bg-red-50 hover:text-red-700" onClick={handleLogout}>
+                                    <Button variant="ghost" className="w-full h-11 text-red-600 hover:bg-red-50 hover:text-red-700 font-medium" onClick={handleLogout}>
                                         Sign Out <LogOut className="w-4 h-4 ml-2" />
                                     </Button>
                                 </div>
