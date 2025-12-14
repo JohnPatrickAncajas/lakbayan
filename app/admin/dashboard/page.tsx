@@ -17,7 +17,10 @@ import {
   Activity,
   Trophy,
   Download,
-  Medal
+  Medal,
+  MapPin,
+  Route,
+  PieChart as PieChartIcon
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -53,9 +56,10 @@ interface UserLoginMetric {
 
 interface LeaderboardEntry {
   username: string
-  points: number
-  contributions: number
-  user_id?: number
+  lakbay_points: number
+  percentage: number
+  verified_terminals: number
+  verified_routes: number
 }
 
 interface AnalyticsData {
@@ -73,13 +77,30 @@ interface UserData {
 
 type TimeRange = '24h' | '7d' | '30d' | 'all'
 type Interval = '1h' | '6h' | '12h' | '24h'
-type MetricItem = TotalLoginMetric | UniqueUserMetric
 
 interface ChartDataPoint {
   label: string
   fullDate: string
   value: number
   originalDate: Date
+}
+
+const isArray = (value: unknown): value is unknown[] => Array.isArray(value)
+
+const findArrayInData = (data: unknown): unknown[] => {
+  if (isArray(data)) return data
+  if (typeof data === 'object' && data !== null) {
+    const record = data as Record<string, unknown>
+    if (isArray(record.contributors)) return record.contributors
+    if (isArray(record.results)) return record.results
+    if (isArray(record.leaderboard)) return record.leaderboard
+    if (isArray(record.data)) return record.data
+    
+    for (const key in record) {
+      if (isArray(record[key])) return record[key]
+    }
+  }
+  return []
 }
 
 const formatDateLabel = (date: Date, interval: Interval) => {
@@ -107,9 +128,9 @@ const getRelativeDateHeader = (dateStr: string) => {
   }
 }
 
-const processChartData = (
-  data: MetricItem[], 
-  valueKey: string, 
+const processChartData = <T extends { hour: string }>(
+  data: T[], 
+  valueKey: keyof T, 
   range: TimeRange, 
   interval: Interval
 ): ChartDataPoint[] => {
@@ -154,8 +175,7 @@ const processChartData = (
       }
     }
 
-    const record = item as unknown as Record<string, number | string>
-    const val = Number(record[valueKey]) || 0
+    const val = Number(item[valueKey]) || 0
     grouped[key].value += val
     
     if (date < grouped[key].originalDate) {
@@ -208,6 +228,76 @@ const SimpleBarChart = ({ data, color }: { data: ChartDataPoint[], color: string
   )
 }
 
+const ContributorsPieChart = ({ data }: { data: LeaderboardEntry[] }) => {
+  if (!data || data.length === 0) {
+    return (
+        <div className="h-48 flex items-center justify-center text-slate-400 text-xs">
+            No data for graph
+        </div>
+    )
+  }
+
+  const topData = data.slice(0, 5)
+  let cumulativePercent = 0
+
+  const colors = [
+    'text-yellow-400', 
+    'text-slate-400', 
+    'text-orange-400', 
+    'text-blue-400', 
+    'text-emerald-400'
+  ]
+
+  return (
+    <div className="flex flex-col items-center justify-center py-4">
+      <div className="relative w-40 h-40">
+        <svg viewBox="0 0 100 100" className="w-full h-full -rotate-90">
+          {topData.map((entry, i) => {
+            const percent = entry.percentage || 0
+            const radius = 40
+            const circumference = 2 * Math.PI * radius
+            const strokeDasharray = `${(percent / 100) * circumference} ${circumference}`
+            const strokeDashoffset = -((cumulativePercent / 100) * circumference)
+            
+            cumulativePercent += percent
+            
+            return (
+              <circle
+                key={i}
+                r={radius}
+                cx="50"
+                cy="50"
+                fill="transparent"
+                stroke="currentColor"
+                strokeWidth="20"
+                strokeDasharray={strokeDasharray}
+                strokeDashoffset={strokeDashoffset}
+                className={`${colors[i % colors.length]} hover:opacity-80 transition-opacity cursor-pointer`}
+              >
+                <title>{entry.username}: {percent}%</title>
+              </circle>
+            )
+          })}
+        </svg>
+        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+           <Trophy className="w-6 h-6 text-slate-300 mb-1" />
+           <span className="text-[10px] text-slate-500 font-medium">Top {topData.length}</span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-x-4 gap-y-2 mt-6 w-full px-2">
+        {topData.map((entry, i) => (
+            <div key={i} className="flex items-center gap-2 text-xs">
+                <div className={`w-2.5 h-2.5 rounded-full bg-current ${colors[i % colors.length].replace('text-', 'bg-')}`} />
+                <span className="truncate max-w-[80px] text-slate-600 font-medium" title={entry.username}>{entry.username}</span>
+                <span className="text-slate-400 ml-auto">{entry.percentage}%</span>
+            </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function AdminDashboard() {
   const router = useRouter()
   const [isLoading, setIsLoading] = useState(true)
@@ -238,13 +328,20 @@ export default function AdminDashboard() {
       const hourlyData = resLogins.ok ? await resLogins.json() : []
       const uniqueData = resUnique.ok ? await resUnique.json() : []
       const activityData = resActivity.ok ? await resActivity.json() : []
-      const leaderboardData = resLeaderboard.ok ? await resLeaderboard.json() : []
+      
+      let leaderboardData: LeaderboardEntry[] = []
+      
+      if (resLeaderboard.ok) {
+          const json = await resLeaderboard.json()
+          const extractedArray = findArrayInData(json)
+          leaderboardData = extractedArray as LeaderboardEntry[]
+      }
 
       setAnalytics({
         hourly_logins: Array.isArray(hourlyData) ? hourlyData : [],
         unique_users: Array.isArray(uniqueData) ? uniqueData : [],
         user_activity: Array.isArray(activityData) ? activityData : [],
-        leaderboard: Array.isArray(leaderboardData) ? leaderboardData : []
+        leaderboard: leaderboardData
       })
     } catch (error) {
       console.error(error)
@@ -272,7 +369,7 @@ export default function AdminDashboard() {
       }
       setUser(parsedUser)
       fetchAnalytics(token)
-    } catch {
+    } catch (e) {
       router.replace("/auth")
     }
   }, [router, fetchAnalytics])
@@ -287,12 +384,12 @@ export default function AdminDashboard() {
   }
 
   const processedLogins = useMemo(() => 
-    processChartData(analytics.hourly_logins, 'count', timeRange, interval), 
+    processChartData<TotalLoginMetric>(analytics.hourly_logins, 'count', timeRange, interval), 
     [analytics.hourly_logins, timeRange, interval]
   )
 
   const processedUnique = useMemo(() => 
-    processChartData(analytics.unique_users, 'unique_users', timeRange, interval), 
+    processChartData<UniqueUserMetric>(analytics.unique_users, 'unique_users', timeRange, interval), 
     [analytics.unique_users, timeRange, interval]
   )
 
@@ -326,8 +423,13 @@ export default function AdminDashboard() {
     return grouped
   }, [analytics.user_activity, timeRange, userSearch])
 
+  const uniqueUsersFromList = useMemo(() => {
+    const allItems = Object.values(filteredAndGroupedActivity).flat()
+    const uniqueIds = new Set(allItems.map(item => item.user__id))
+    return uniqueIds.size
+  }, [filteredAndGroupedActivity])
+
   const totalLogins = processedLogins.reduce((acc, curr) => acc + curr.value, 0)
-  const totalUnique = processedUnique.reduce((acc, curr) => acc + curr.value, 0)
   const totalListEvents = Object.values(filteredAndGroupedActivity)
     .flat()
     .reduce((acc, curr) => acc + curr.count, 0)
@@ -481,8 +583,8 @@ export default function AdminDashboard() {
             </CardHeader>
             <CardContent>
               <div className="flex items-baseline gap-2 mb-2">
-                <span className="text-2xl font-bold">{totalUnique}</span>
-                <span className="text-xs text-slate-400">in selected range</span>
+                <span className="text-2xl font-bold">{uniqueUsersFromList}</span>
+                <span className="text-xs text-slate-400">distinct users in list</span>
               </div>
               <SimpleBarChart 
                 data={processedUnique} 
@@ -570,22 +672,36 @@ export default function AdminDashboard() {
                 </CardContent>
             </Card>
 
-            <div className="space-y-6">
-                <Card className="shadow-sm border-slate-200 h-full">
-                    <CardHeader className="pb-4 border-b border-slate-50">
+            <div className="space-y-6 h-full">
+                <Card className="shadow-sm border-slate-200 h-full flex flex-col">
+                    <CardHeader className="pb-2 border-b border-slate-50 flex-none">
+                        <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                            <PieChartIcon className="w-4 h-4 text-purple-500" />
+                            <CardTitle className="text-sm font-medium text-slate-700">Contribution Share</CardTitle>
+                        </div>
+                        </div>
+                    </CardHeader>
+                    <CardContent className="pt-2 flex-none">
+                         <ContributorsPieChart data={analytics.leaderboard} />
+                    </CardContent>
+                    
+                    <div className="border-t border-slate-100 mx-6 my-2"></div>
+                    
+                    <CardHeader className="pb-2 pt-2 flex-none">
                         <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
                             <Trophy className="w-4 h-4 text-amber-500" />
-                            <CardTitle className="text-sm font-medium text-slate-700">Top Contributors</CardTitle>
+                            <CardTitle className="text-sm font-medium text-slate-700">Leaderboard</CardTitle>
                         </div>
                         <Badge variant="secondary" className="bg-amber-50 text-amber-600 border-amber-100 font-normal">
                             Lakbay Points
                         </Badge>
                         </div>
                     </CardHeader>
-                    <CardContent className="pt-4">
-                        <ScrollArea className="h-[450px] pr-4">
-                            <div className="space-y-4">
+                    <CardContent className="flex-1 min-h-0">
+                        <ScrollArea className="h-full pr-4">
+                            <div className="space-y-4 pb-4">
                             {analytics.leaderboard.length > 0 ? analytics.leaderboard.map((user, i) => (
                                 <div key={i} className="flex items-center justify-between p-2 rounded-lg hover:bg-slate-50 transition-colors">
                                 <div className="flex items-center gap-3">
@@ -600,11 +716,20 @@ export default function AdminDashboard() {
                                     </div>
                                     <div>
                                     <p className="text-sm font-semibold text-slate-900 leading-none">{user.username}</p>
-                                    <p className="text-[10px] text-slate-400 mt-1 font-medium">{user.contributions} contributions</p>
+                                    <div className="flex gap-2 mt-1">
+                                        <div className="flex items-center gap-1 text-[10px] text-slate-400 font-medium" title="Verified Terminals">
+                                            <MapPin className="w-3 h-3" />
+                                            {user.verified_terminals}
+                                        </div>
+                                        <div className="flex items-center gap-1 text-[10px] text-slate-400 font-medium" title="Verified Routes">
+                                            <Route className="w-3 h-3" />
+                                            {user.verified_routes}
+                                        </div>
+                                    </div>
                                     </div>
                                 </div>
                                 <div className="text-right">
-                                    <span className="block text-sm font-bold text-slate-700">{user.points}</span>
+                                    <span className="block text-sm font-bold text-slate-700">{user.lakbay_points}</span>
                                     <span className="text-[10px] text-slate-400">pts</span>
                                 </div>
                                 </div>
