@@ -2,12 +2,37 @@
 
 import { useState, useEffect, useCallback } from "react"
 import Link from "next/link"
-import { Eye, EyeOff, Loader2, Lock, Mail, User, AlertCircle, CheckCircle2, MapPin, ShieldAlert, LogOut, ArrowRight, Info, FileText, Bus, Waypoints, Shield, BarChart3, LayoutDashboard, ChevronRight } from "lucide-react"
+import { 
+  Eye, 
+  EyeOff, 
+  Loader2, 
+  Lock, 
+  Mail, 
+  User, 
+  AlertCircle, 
+  CheckCircle2, 
+  MapPin, 
+  ShieldAlert, 
+  LogOut, 
+  ArrowRight, 
+  Info, 
+  FileText, 
+  Bus, 
+  Waypoints, 
+  Shield, 
+  BarChart3, 
+  LayoutDashboard, 
+  ChevronRight,
+  Trophy,
+  Medal,
+  Route,
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { useRouter } from "next/navigation"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { Badge } from "@/components/ui/badge"
 
 const API_BASE_URL = "https://api-lakbayan.onrender.com/api"
 
@@ -55,6 +80,84 @@ interface ContributionsSummary {
   }
 }
 
+interface LeaderboardEntry {
+  username: string
+  lakbay_points: number
+  percentage: number
+  verified_terminals: number
+  verified_routes: number
+}
+
+const ContributorsPieChart = ({ data }: { data: LeaderboardEntry[] }) => {
+  if (!data || data.length === 0) {
+    return (
+        <div className="h-40 flex items-center justify-center text-slate-400 text-xs">
+            No data available
+        </div>
+    )
+  }
+
+  const topData = data.slice(0, 5)
+  let cumulativePercent = 0
+
+  const colors = [
+    'text-yellow-400', 
+    'text-slate-400', 
+    'text-orange-400', 
+    'text-blue-400', 
+    'text-emerald-400'
+  ]
+
+  return (
+    <div className="flex flex-col items-center justify-center py-4">
+      <div className="relative w-32 h-32">
+        <svg viewBox="0 0 100 100" className="w-full h-full -rotate-90">
+          {topData.map((entry, i) => {
+            const percent = entry.percentage || 0
+            const radius = 40
+            const circumference = 2 * Math.PI * radius
+            const strokeDasharray = `${(percent / 100) * circumference} ${circumference}`
+            const strokeDashoffset = -((cumulativePercent / 100) * circumference)
+            
+            cumulativePercent += percent
+            
+            return (
+              <circle
+                key={i}
+                r={radius}
+                cx="50"
+                cy="50"
+                fill="transparent"
+                stroke="currentColor"
+                strokeWidth="20"
+                strokeDasharray={strokeDasharray}
+                strokeDashoffset={strokeDashoffset}
+                className={`${colors[i % colors.length]} hover:opacity-80 transition-opacity cursor-pointer`}
+              >
+                <title>{entry.username}: {percent}%</title>
+              </circle>
+            )
+          })}
+        </svg>
+        <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+           <Trophy className="w-5 h-5 text-slate-300 mb-1" />
+           <span className="text-[10px] text-slate-500 font-medium">Top {topData.length}</span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-x-2 gap-y-1 mt-4 w-full px-4">
+        {topData.map((entry, i) => (
+            <div key={i} className="flex items-center gap-1.5 text-[10px]">
+                <div className={`w-2 h-2 rounded-full bg-current ${colors[i % colors.length].replace('text-', 'bg-')}`} />
+                <span className="truncate max-w-[80px] text-slate-600 font-medium" title={entry.username}>{entry.username}</span>
+                <span className="text-slate-400 ml-auto">{entry.percentage}%</span>
+            </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function AuthPage() {
   const router = useRouter()
   
@@ -67,6 +170,7 @@ export default function AuthPage() {
   const [user, setUser] = useState<UserData | null>(null)
   const [isVerified, setIsVerified] = useState(false)
   const [contributions, setContributions] = useState<ContributionsSummary | null>(null)
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([])
   
   const [formData, setFormData] = useState({
     username: "",
@@ -77,6 +181,25 @@ export default function AuthPage() {
 
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
+
+  const fetchLeaderboard = useCallback(async () => {
+    try {
+        const response = await fetch(`${API_BASE_URL}/analytics/lakbay-leaderboards/`)
+        if (response.ok) {
+            const json = await response.json()
+            let data: LeaderboardEntry[] = []
+            
+            if (json.contributors && Array.isArray(json.contributors)) {
+                data = json.contributors
+            } else if (Array.isArray(json)) {
+                data = json
+            }
+            setLeaderboard(data)
+        }
+    } catch (error) {
+        console.error(error)
+    }
+  }, [])
 
   const fetchContributions = useCallback(async (token: string) => {
     try {
@@ -125,6 +248,7 @@ export default function AuthPage() {
         setIsVerified(data.email_verified)
         setViewState('profile')
         fetchContributions(token)
+        fetchLeaderboard()
       } else {
         handleLogout() 
       }
@@ -133,7 +257,7 @@ export default function AuthPage() {
     } finally {
       setIsPageLoading(false)
     }
-  }, [fetchContributions])
+  }, [fetchContributions, fetchLeaderboard])
 
   useEffect(() => {
     checkAuthStatus()
@@ -242,6 +366,7 @@ export default function AuthPage() {
     localStorage.removeItem("user")
     setUser(null)
     setContributions(null)
+    setLeaderboard([])
     setViewState('login')
     setFormData({ username: "", email: "", password: "", confirmPassword: "" })
   }
@@ -468,6 +593,58 @@ export default function AuthPage() {
                                             </div>
                                         </div>
                                     )}
+
+                                    {/* Community Leaderboard */}
+                                    <div className="bg-white border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                                        <div className="bg-slate-50 p-4 border-b border-slate-200 flex items-center justify-between">
+                                            <div className="flex items-center gap-2 font-bold text-slate-800">
+                                                <Trophy className="w-4 h-4 text-amber-500" /> Community Leaderboard
+                                            </div>
+                                            <Badge variant="secondary" className="bg-amber-50 text-amber-600 border-amber-100 font-normal text-xs">
+                                                Lakbay Points
+                                            </Badge>
+                                        </div>
+                                        <div className="p-4 grid grid-cols-1 gap-4">
+                                            {leaderboard.length > 0 ? (
+                                                <>
+                                                    <div className="bg-slate-50/50 rounded-lg border border-slate-100">
+                                                        <ContributorsPieChart data={leaderboard} />
+                                                    </div>
+                                                    <ScrollArea className="h-[200px]">
+                                                        <div className="space-y-1">
+                                                            {leaderboard.map((entry, i) => (
+                                                                <div key={i} className="flex items-center justify-between p-2 rounded-lg hover:bg-slate-50 transition-colors">
+                                                                    <div className="flex items-center gap-3">
+                                                                        <div className={`
+                                                                            w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border
+                                                                            ${i === 0 ? 'bg-yellow-50 text-yellow-600 border-yellow-200' : 
+                                                                              i === 1 ? 'bg-slate-50 text-slate-600 border-slate-200' : 
+                                                                              i === 2 ? 'bg-orange-50 text-orange-600 border-orange-200' : 
+                                                                              'bg-white text-slate-400 border-slate-100'}
+                                                                        `}>
+                                                                            {i < 3 ? <Medal className="w-3 h-3" /> : i + 1}
+                                                                        </div>
+                                                                        <div>
+                                                                            <span className="text-sm font-semibold text-slate-700 block">{entry.username}</span>
+                                                                            <div className="flex gap-2 text-[10px] text-slate-400">
+                                                                                <span className="flex items-center gap-0.5"><MapPin className="w-2 h-2"/> {entry.verified_terminals}</span>
+                                                                                <span className="flex items-center gap-0.5"><Route className="w-2 h-2"/> {entry.verified_routes}</span>
+                                                                            </div>
+                                                                        </div>
+                                                                    </div>
+                                                                    <span className="text-xs font-bold text-slate-700">{entry.lakbay_points} <span className="text-[9px] font-normal text-slate-400">pts</span></span>
+                                                                </div>
+                                                            ))}
+                                                        </div>
+                                                    </ScrollArea>
+                                                </>
+                                            ) : (
+                                                <div className="text-center py-8 text-slate-400 text-xs">
+                                                    Loading leaderboard...
+                                                </div>
+                                            )}
+                                        </div>
+                                    </div>
                                 </div>
                             )}
 
