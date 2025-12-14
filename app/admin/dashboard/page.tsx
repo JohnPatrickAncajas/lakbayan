@@ -77,6 +77,7 @@ interface UserData {
 
 type TimeRange = '24h' | '7d' | '30d' | 'all'
 type Interval = '1h' | '6h' | '12h' | '24h'
+type MetricItem = TotalLoginMetric | UniqueUserMetric
 
 interface ChartDataPoint {
   label: string
@@ -128,9 +129,9 @@ const getRelativeDateHeader = (dateStr: string) => {
   }
 }
 
-const processChartData = <T extends { hour: string }>(
-  data: T[], 
-  valueKey: keyof T, 
+const processChartData = (
+  data: MetricItem[], 
+  valueKey: 'count' | 'unique_users', 
   range: TimeRange, 
   interval: Interval
 ): ChartDataPoint[] => {
@@ -175,7 +176,8 @@ const processChartData = <T extends { hour: string }>(
       }
     }
 
-    const val = Number(item[valueKey]) || 0
+    const record = item as unknown as Record<string, number | string>
+    const val = Number(record[valueKey]) || 0
     grouped[key].value += val
     
     if (date < grouped[key].originalDate) {
@@ -369,7 +371,7 @@ export default function AdminDashboard() {
       }
       setUser(parsedUser)
       fetchAnalytics(token)
-    } catch (e) {
+    } catch {
       router.replace("/auth")
     }
   }, [router, fetchAnalytics])
@@ -384,12 +386,12 @@ export default function AdminDashboard() {
   }
 
   const processedLogins = useMemo(() => 
-    processChartData<TotalLoginMetric>(analytics.hourly_logins, 'count', timeRange, interval), 
+    processChartData(analytics.hourly_logins, 'count', timeRange, interval), 
     [analytics.hourly_logins, timeRange, interval]
   )
 
   const processedUnique = useMemo(() => 
-    processChartData<UniqueUserMetric>(analytics.unique_users, 'unique_users', timeRange, interval), 
+    processChartData(analytics.unique_users, 'unique_users', timeRange, interval), 
     [analytics.unique_users, timeRange, interval]
   )
 
@@ -434,20 +436,29 @@ export default function AdminDashboard() {
     .flat()
     .reduce((acc, curr) => acc + curr.count, 0)
 
-  const downloadCSV = () => {
+  const downloadActivityCSV = () => {
     const flatData = Object.values(filteredAndGroupedActivity).flat()
     
     if (!flatData.length) return
   
-    const headers = ["Username", "User ID", "Login Count", "Last Activity"]
+    const pointsMap = new Map<string, number>()
+    analytics.leaderboard.forEach(user => {
+      pointsMap.set(user.username, user.lakbay_points)
+    })
+
+    const headers = ["Username", "User ID", "Login Count", "Lakbay Points", "Last Activity"]
     const csvContent = [
       headers.join(","),
-      ...flatData.map(row => [
-        row.user__username,
-        row.user__id,
-        row.count,
-        `"${new Date(row.hour).toLocaleString()}"`
-      ].join(","))
+      ...flatData.map(row => {
+        const points = pointsMap.get(row.user__username) || 0
+        return [
+          row.user__username,
+          row.user__id,
+          row.count,
+          points,
+          `"${new Date(row.hour).toLocaleString()}"`
+        ].join(",")
+      })
     ].join("\n")
   
     const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" })
@@ -455,6 +466,34 @@ export default function AdminDashboard() {
     const link = document.createElement("a")
     link.setAttribute("href", url)
     link.setAttribute("download", `login_activity_${new Date().toISOString().split('T')[0]}.csv`)
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+  }
+
+  const downloadLeaderboardCSV = () => {
+    const data = analytics.leaderboard
+    
+    if (!data.length) return
+  
+    const headers = ["Rank", "Username", "Lakbay Points", "Verified Terminals", "Verified Routes", "Percentage"]
+    const csvContent = [
+      headers.join(","),
+      ...data.map((row, index) => [
+        index + 1,
+        row.username,
+        row.lakbay_points,
+        row.verified_terminals,
+        row.verified_routes,
+        `${row.percentage}%`
+      ].join(","))
+    ].join("\n")
+  
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement("a")
+    link.setAttribute("href", url)
+    link.setAttribute("download", `lakbay_leaderboard_${new Date().toISOString().split('T')[0]}.csv`)
     document.body.appendChild(link)
     link.click()
     document.body.removeChild(link)
@@ -517,11 +556,11 @@ export default function AdminDashboard() {
                 variant="outline" 
                 size="sm" 
                 className="h-9 gap-2 bg-white border-slate-200 text-slate-600 hover:text-blue-600 hover:border-blue-200 shadow-sm"
-                onClick={downloadCSV}
+                onClick={downloadActivityCSV}
                 disabled={totalListEvents === 0}
             >
                 <Download className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Export CSV</span>
+                <span className="hidden sm:inline">Export Log</span>
             </Button>
             
             <div className="flex items-center gap-2 bg-white p-1 rounded-lg border border-slate-200 shadow-sm">
@@ -694,9 +733,21 @@ export default function AdminDashboard() {
                             <Trophy className="w-4 h-4 text-amber-500" />
                             <CardTitle className="text-sm font-medium text-slate-700">Leaderboard</CardTitle>
                         </div>
-                        <Badge variant="secondary" className="bg-amber-50 text-amber-600 border-amber-100 font-normal">
-                            Lakbay Points
-                        </Badge>
+                        <div className="flex items-center gap-2">
+                             <Button 
+                                variant="ghost" 
+                                size="icon" 
+                                className="h-6 w-6 text-slate-400 hover:text-blue-600"
+                                onClick={downloadLeaderboardCSV}
+                                disabled={analytics.leaderboard.length === 0}
+                                title="Download Leaderboard CSV"
+                            >
+                                <Download className="w-3.5 h-3.5" />
+                            </Button>
+                            <Badge variant="secondary" className="bg-amber-50 text-amber-600 border-amber-100 font-normal">
+                                Lakbay Points
+                            </Badge>
+                        </div>
                         </div>
                     </CardHeader>
                     <CardContent className="flex-1 min-h-0">
