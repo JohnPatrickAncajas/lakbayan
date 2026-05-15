@@ -9,7 +9,6 @@ import { Badge } from "@/components/ui/badge"
 import Link from "next/link"
 import { RoutePanel, RouteData, RouteStep } from "@/components/route-panel"
 import { ContributionModal } from "@/components/contribution-modal"
-import "leaflet/dist/leaflet.css"
 
 import type { Map, Layer, Marker, Polyline, CircleMarker, LeafletMouseEvent } from "leaflet"
 import type * as Leaflet from "leaflet"
@@ -69,6 +68,9 @@ interface ExpandedRoute {
   end: Terminal
   steps: RouteStep[]
   geometry?: [number, number][]
+  walkToBoard?: number
+  walkFromAlight?: number
+  stops?: { name: string; lat: number; lng: number }[]
 }
 
 interface BestPath {
@@ -116,6 +118,73 @@ function processGeoJsonCoordinates(coords: unknown): [number, number][] {
       return null;
     })
     .filter((c): c is [number, number] => c !== null);
+}
+
+function getNearestRouteStop(stops: { lat: number; lng: number; stopName: string; index: number }[], point: { lat: number; lng: number }) {
+  return stops.reduce((best, current) => {
+    const dist = getDistance(point.lat, point.lng, current.lat, current.lng)
+    if (best === null || dist < best.distance) {
+      return { stop: current, distance: dist }
+    }
+    return best
+  }, null as { stop: { lat: number; lng: number; stopName: string; index: number }; distance: number } | null)
+}
+
+function createRouteCandidate(
+  terminal: APITerminal,
+  route: APIRoute,
+  stops: { lat: number; lng: number; stopName: string; time: number; fare: number; distance: number; index: number; originalStop: APIRoute['stops'][number] }[],
+  origin: { lat: number; lng: number },
+  destination: { lat: number; lng: number },
+  geometry?: [number, number][],
+  reverse = false,
+) {
+  if (stops.length < 2) return null
+
+  const originMatch = getNearestRouteStop(stops, origin)
+  const destinationMatch = getNearestRouteStop(stops, destination)
+  if (!originMatch || !destinationMatch) return null
+
+  const boardIndex = originMatch.stop.index
+  const alightIndex = destinationMatch.stop.index
+  if (boardIndex >= alightIndex) return null
+
+  const walkToBoard = originMatch.distance
+  const walkFromAlight = destinationMatch.distance
+  const routeStops = stops.slice(boardIndex, alightIndex + 1)
+
+  const boardStop = routeStops[0]
+  const alightStop = routeStops[routeStops.length - 1]
+
+  const timeDifference = Math.abs(alightStop.time - boardStop.time)
+  const fareDifference = Math.abs(alightStop.fare - boardStop.fare)
+  const distanceDifference = Math.abs(alightStop.distance - boardStop.distance)
+
+  const routeName = `${route.mode.mode_name} • ${terminal.name} → ${route.destination_name || alightStop.stopName}`
+
+  const steps: RouteStep[] = [
+    { instruction: `Walk ${walkToBoard.toFixed(1)} km to ${boardStop.stopName}`, location: [boardStop.lat, boardStop.lng] },
+    { instruction: `Board ${route.mode.mode_name} at ${boardStop.stopName}`, location: [boardStop.lat, boardStop.lng] },
+    { instruction: `Ride to ${alightStop.stopName}` },
+    { instruction: `Alight at ${alightStop.stopName}`, location: [alightStop.lat, alightStop.lng] },
+    { instruction: `Walk ${walkFromAlight.toFixed(1)} km to destination`, location: [alightStop.lat, alightStop.lng] },
+  ]
+
+  return {
+    originalId: `${terminal.id}-${route.id}-${reverse ? 'return' : 'forward'}-${boardIndex}-${alightIndex}`,
+    name: routeName,
+    type: route.mode.mode_name,
+    fare: { regular: fareDifference, discounted: parseFloat((fareDifference * 0.8).toFixed(2)) },
+    time: timeDifference.toString(),
+    distance: distanceDifference.toFixed(1),
+    start: { id: `${boardStop.index}`, name: boardStop.stopName, lat: boardStop.lat, lng: boardStop.lng },
+    end: { id: `${alightStop.index}`, name: alightStop.stopName, lat: alightStop.lat, lng: alightStop.lng },
+    steps,
+    geometry: geometry ? (reverse ? [...geometry].reverse() : geometry) : undefined,
+    walkToBoard,
+    walkFromAlight,
+    stops: routeStops.map(stop => ({ name: stop.stopName, lat: stop.lat, lng: stop.lng })),
+  } as ExpandedRoute
 }
 
 function getModeColor(mode: string) {
@@ -182,6 +251,7 @@ export function MapInterface() {
   const [L, setLeaflet] = useState<typeof Leaflet | null>(null)
   
   const [selectedRoute, setSelectedRoute] = useState<RouteData | null>(null)
+  const [suggestionMessage, setSuggestionMessage] = useState<string | null>(null)
   
   const [fromLocation, setFromLocation] = useState("")
   const [toLocation, setToLocation] = useState("")
@@ -590,72 +660,72 @@ export function MapInterface() {
       const maxWalkKm = parseDistanceInput(maxWalkInput);
       const limitTransfers = parseInt(transfersInput) || 2;
       const allSegments: ExpandedRoute[] = []
-      
+      let closestCandidate: { route: ExpandedRoute; totalWalk: number } | null = null
+
       terminalsData.forEach(terminal => {
           terminal.routes.forEach(route => {
-              if (!route.stops || route.stops.length === 0) return;
-              if (!selectedModes.some(m => route.mode.mode_name.toLowerCase().includes(m))) return;
+              if (!route.stops || route.stops.length === 0) return
+              if (!selectedModes.some(m => route.mode.mode_name.toLowerCase().includes(m))) return
 
-              const startT: Terminal = { id: terminal.id.toString(), name: terminal.name, lat: parseFloat(terminal.latitude.toString()), lng: parseFloat(terminal.longitude.toString()) }
-              const endStop = route.stops[route.stops.length - 1]
-              const endT: Terminal = { id: endStop.id.toString(), name: endStop.stop_name, lat: parseFloat(endStop.latitude.toString()), lng: parseFloat(endStop.longitude.toString()) }
-              
-              let geometry: [number, number][] | undefined = undefined;
+              const routeStops = route.stops
+                .map((stop, index) => {
+                  const lat = parseFloat(stop.latitude.toString())
+                  const lng = parseFloat(stop.longitude.toString())
+                  const time = Math.abs(parseFloat(stop.time.toString()) || 0)
+                  const fare = Math.abs(parseFloat(stop.fare.toString()) || 0)
+                  const distance = Math.abs(parseDistanceInput(stop.distance ? stop.distance.toString() : '0'))
+                  if (isNaN(lat) || isNaN(lng)) return null
+                  return {
+                    lat,
+                    lng,
+                    stopName: stop.stop_name,
+                    time,
+                    fare,
+                    distance,
+                    index,
+                    originalStop: stop,
+                  }
+                })
+                .filter(Boolean) as { lat: number; lng: number; stopName: string; time: number; fare: number; distance: number; index: number; originalStop: APIRoute['stops'][number] }[]
+
+              if (routeStops.length < 2) return
+
+              let geometry: [number, number][] | undefined = undefined
               if (route.polyline && route.polyline.coordinates && route.polyline.coordinates.length > 0) {
-                  geometry = processGeoJsonCoordinates(route.polyline.coordinates);
+                  geometry = processGeoJsonCoordinates(route.polyline.coordinates)
               } else if (route.geometry && route.geometry.length > 0) {
-                  geometry = route.geometry;
+                  geometry = route.geometry
               }
 
-              const endStopFare = Math.abs(parseFloat(endStop.fare.toString()) || 0);
-              const endStopDist = Math.abs(parseDistanceInput(endStop.distance ? endStop.distance.toString() : '0'));
-              const endStopTime = Math.abs(parseFloat(endStop.time.toString()) || 0);
+              const forwardCandidate = createRouteCandidate(terminal, route, routeStops, fromCoords, toCoords, geometry, false)
+              const reverseCandidate = createRouteCandidate(terminal, route, [...routeStops].reverse().map((stop, idx) => ({ ...stop, index: idx })), fromCoords, toCoords, geometry, true)
 
-              const baseRoute: ExpandedRoute = {
-                  originalId: `${terminal.id}-${route.id}`,
-                  name: `${route.mode.mode_name} - ${terminal.name} to ${endStop.stop_name}`,
-                  type: route.mode.mode_name,
-                  fare: { regular: endStopFare, discounted: endStopFare * 0.8 },
-                  distance: endStopDist.toFixed(1) + " km",
-                  time: endStopTime + " min",
-                  start: startT,
-                  end: endT,
-                  steps: route.stops.map(s => ({ instruction: s.stop_name })),
-                  geometry: geometry
-              }
-
-              allSegments.push(baseRoute)
-              
-              const returnGeometry = geometry ? [...geometry].reverse() as [number, number][] : undefined;
-
-              allSegments.push({
-                  ...baseRoute,
-                  name: `${baseRoute.name} (Return)`,
-                  start: endT,
-                  end: startT,
-                  steps: [{ instruction: `Board ${baseRoute.type} at ${endT.name}` }, { instruction: `Travel to ${startT.name}` }],
-                  geometry: returnGeometry 
-              })
+              if (forwardCandidate) allSegments.push(forwardCandidate)
+              if (reverseCandidate) allSegments.push(reverseCandidate)
           })
       })
 
       let bestPath: BestPath | null = null
-      let bestScore = Infinity 
+      let bestScore = Infinity
 
       for (const segment of allSegments) {
         const d1 = getDistance(fromCoords.lat, fromCoords.lng, segment.start.lat, segment.start.lng)
         const d2 = getDistance(segment.end.lat, segment.end.lng, toCoords.lat, toCoords.lng)
-        const totalWalk = d1 + d2;
-        
+        const totalWalk = d1 + d2
+
+        if (!closestCandidate || totalWalk < closestCandidate.totalWalk) {
+          closestCandidate = { route: segment, totalWalk }
+        }
+
         if (totalWalk <= maxWalkKm) {
-            const timeVal = Math.abs(parseFloat(segment.time));
-            const distVal = Math.abs(parseFloat(segment.distance));
-            const fareVal = segment.fare.regular;
+            const timeVal = Math.abs(parseFloat(segment.time))
+            const distVal = Math.abs(parseFloat(segment.distance))
+            const fareVal = segment.fare.regular
             
-            let score = 0;
-            if (sortBy === 'time') score = timeVal + (totalWalk * 12); 
-            else if (sortBy === 'fare') score = fareVal + (totalWalk * 10); 
-            else score = distVal + totalWalk;
+            let score = 0
+            if (sortBy === 'time') score = timeVal + (totalWalk * 12)
+            else if (sortBy === 'fare') score = fareVal + (totalWalk * 10)
+            else score = distVal + totalWalk
 
             if (score < bestScore) {
                 bestScore = score
@@ -671,17 +741,17 @@ export function MapInterface() {
                 if (r1.originalId === r2.originalId) continue
                 const dTransfer = getDistance(r1.end.lat, r1.end.lng, r2.start.lat, r2.start.lng)
                 const dEnd = getDistance(r2.end.lat, r2.end.lng, toCoords.lat, toCoords.lng)
-                const totalWalk = dStart + dTransfer + dEnd;
+                const totalWalk = dStart + dTransfer + dEnd
 
                 if (totalWalk <= maxWalkKm) {
-                    const timeVal = Math.abs(parseFloat(r1.time)) + Math.abs(parseFloat(r2.time));
-                    const fareVal = r1.fare.regular + r2.fare.regular;
-                    const distVal = Math.abs(parseFloat(r1.distance)) + Math.abs(parseFloat(r2.distance));
+                    const timeVal = Math.abs(parseFloat(r1.time)) + Math.abs(parseFloat(r2.time))
+                    const fareVal = r1.fare.regular + r2.fare.regular
+                    const distVal = Math.abs(parseFloat(r1.distance)) + Math.abs(parseFloat(r2.distance))
 
-                    let score = 0;
-                    if (sortBy === 'time') score = timeVal + (totalWalk * 12);
-                    else if (sortBy === 'fare') score = fareVal + (totalWalk * 10);
-                    else score = distVal + totalWalk;
+                    let score = 0
+                    if (sortBy === 'time') score = timeVal + (totalWalk * 12)
+                    else if (sortBy === 'fare') score = fareVal + (totalWalk * 10)
+                    else score = distVal + totalWalk
 
                     if (score < bestScore) {
                         bestScore = score
@@ -694,17 +764,17 @@ export function MapInterface() {
                          if (r2.originalId === r3.originalId || r1.originalId === r3.originalId) continue
                          const dTransfer2 = getDistance(r2.end.lat, r2.end.lng, r3.start.lat, r3.start.lng)
                          const dEnd2 = getDistance(r3.end.lat, r3.end.lng, toCoords.lat, toCoords.lng)
-                         const totalWalk3 = dStart + dTransfer + dTransfer2 + dEnd2;
+                         const totalWalk3 = dStart + dTransfer + dTransfer2 + dEnd2
 
                          if (totalWalk3 <= maxWalkKm) {
-                             const timeVal3 = Math.abs(parseFloat(r1.time)) + Math.abs(parseFloat(r2.time)) + Math.abs(parseFloat(r3.time));
-                             const fareVal3 = r1.fare.regular + r2.fare.regular + r3.fare.regular;
-                             const distVal3 = Math.abs(parseFloat(r1.distance)) + Math.abs(parseFloat(r2.distance)) + Math.abs(parseFloat(r3.distance));
+                             const timeVal3 = Math.abs(parseFloat(r1.time)) + Math.abs(parseFloat(r2.time)) + Math.abs(parseFloat(r3.time))
+                             const fareVal3 = r1.fare.regular + r2.fare.regular + r3.fare.regular
+                             const distVal3 = Math.abs(parseFloat(r1.distance)) + Math.abs(parseFloat(r2.distance)) + Math.abs(parseFloat(r3.distance))
 
-                             let score3 = 0;
-                             if (sortBy === 'time') score3 = timeVal3 + (totalWalk3 * 12);
-                             else if (sortBy === 'fare') score3 = fareVal3 + (totalWalk3 * 10);
-                             else score3 = distVal3 + totalWalk3;
+                             let score3 = 0
+                             if (sortBy === 'time') score3 = timeVal3 + (totalWalk3 * 12)
+                             else if (sortBy === 'fare') score3 = fareVal3 + (totalWalk3 * 10)
+                             else score3 = distVal3 + totalWalk3
 
                              if (score3 < bestScore) {
                                 bestScore = score3
@@ -715,6 +785,13 @@ export function MapInterface() {
                 }
             }
         }
+      }
+
+      if (!bestPath && closestCandidate) {
+          bestPath = { type: "suggestion", segments: [closestCandidate.route], walks: [closestCandidate.route.walkToBoard ?? 0, closestCandidate.route.walkFromAlight ?? 0] }
+          setSuggestionMessage(`No route found within ${maxWalkInput}. Closest option is ${closestCandidate.route.name} with ${closestCandidate.totalWalk.toFixed(1)} km of walking. Try increasing max walk or adding another transfer.`)
+      } else {
+          setSuggestionMessage(null)
       }
 
       if (bestPath) {
@@ -773,6 +850,20 @@ export function MapInterface() {
 
             await drawSegment(seg, seg.start, seg.end, 'ride', modeColor, null);
             
+            if (seg.stops && seg.stops.length > 0) {
+                seg.stops.forEach((station) => {
+                    const stopMarker = L.circleMarker([station.lat, station.lng], {
+                        radius: 3,
+                        fillColor: "#ffffff",
+                        color: modeColor,
+                        weight: 2,
+                        fillOpacity: 1,
+                    }).addTo(map)
+                    stopMarker.bindTooltip(station.name, { direction: "top", offset: [0, -5], className: "font-sans text-xs font-bold" })
+                    routeLayersRef.current.push(stopMarker)
+                })
+            }
+
             if (seg.steps && seg.steps.length > 0) {
                  seg.steps.forEach(step => {
                      if (step.location) {
@@ -954,6 +1045,12 @@ export function MapInterface() {
                   {isSearching ? <Loader2 className="w-4 h-4 animate-spin"/> : "Find Route"}
                 </Button>
             </div>
+
+            {suggestionMessage && (
+              <div className="mt-3 rounded-2xl border border-orange-200 bg-orange-50 px-3 py-2 text-sm text-orange-900">
+                <strong>Suggestion:</strong> {suggestionMessage}
+              </div>
+            )}
           </div>
 
           {showSettings && (
