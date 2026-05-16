@@ -1,6 +1,7 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
+import { useRouter } from "next/navigation"
 import { MapPin, Settings2, Compass, Loader2, Plus, UserCircle, Clock, Banknote, Ruler, LogOut, Info, LogIn, Menu, Filter } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -10,7 +11,7 @@ import Link from "next/link"
 import { RoutePanel, RouteData, RouteStep } from "@/components/route-panel"
 import { ContributionModal } from "@/components/contribution-modal"
 
-import type { Map, Layer, Marker, Polyline, CircleMarker, LeafletMouseEvent } from "leaflet"
+import type { Layer, Marker, Polyline, CircleMarker, LeafletMouseEvent } from "leaflet"
 import type * as Leaflet from "leaflet"
 
 interface Terminal {
@@ -70,6 +71,7 @@ interface ExpandedRoute {
   geometry?: [number, number][]
   walkToBoard?: number
   walkFromAlight?: number
+  boardIndex?: number
   stops?: { name: string; lat: number; lng: number }[]
 }
 
@@ -120,71 +122,161 @@ function processGeoJsonCoordinates(coords: unknown): [number, number][] {
     .filter((c): c is [number, number] => c !== null);
 }
 
-function getNearestRouteStop(stops: { lat: number; lng: number; stopName: string; index: number }[], point: { lat: number; lng: number }) {
-  return stops.reduce((best, current) => {
-    const dist = getDistance(point.lat, point.lng, current.lat, current.lng)
-    if (best === null || dist < best.distance) {
-      return { stop: current, distance: dist }
+function findClosestGeometryIndex(geometry: [number, number][], point: { lat: number; lng: number }) {
+  let bestIndex = 0;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (let i = 0; i < geometry.length; i++) {
+    const [lat, lng] = geometry[i];
+    const dist = getDistance(point.lat, point.lng, lat, lng);
+    if (dist < bestDistance) {
+      bestDistance = dist;
+      bestIndex = i;
     }
-    return best
-  }, null as { stop: { lat: number; lng: number; stopName: string; index: number }; distance: number } | null)
+  }
+
+  return bestIndex;
 }
 
-function createRouteCandidate(
+function trimRouteGeometry(geometry: [number, number][], start: { lat: number; lng: number }, end: { lat: number; lng: number }): [number, number][] {
+  if (!geometry || geometry.length === 0) return geometry;
+
+  const startIndex = findClosestGeometryIndex(geometry, start);
+  const endIndex = findClosestGeometryIndex(geometry, end);
+  if (startIndex === endIndex) return [[start.lat, start.lng], [end.lat, end.lng]];
+
+  const sliceStart = Math.max(0, Math.min(startIndex, endIndex) - 1);
+  const sliceEnd = Math.min(geometry.length - 1, Math.max(startIndex, endIndex) + 1);
+  let trimmed = geometry.slice(sliceStart, sliceEnd + 1);
+
+  if (trimmed.length === 0) return [[start.lat, start.lng], [end.lat, end.lng]];
+  if (startIndex > endIndex) trimmed = trimmed.reverse();
+
+  const normalized = [...trimmed];
+  normalized[0] = [start.lat, start.lng];
+  normalized[normalized.length - 1] = [end.lat, end.lng];
+
+  return normalized;
+}
+
+interface SearchStop {
+  lat: number
+  lng: number
+  stopName: string
+  time: number
+  fare: number
+  distance: number
+  index: number
+  routeKey: string
+  terminal: APITerminal
+  route: APIRoute
+  geometry?: [number, number][]
+}
+
+interface SearchState {
+  routeKey: string
+  boardIndex: number
+  alightIndex: number
+  transfers: number
+  score: number
+  priority?: number
+  walks: number[]
+  segments: ExpandedRoute[]
+}
+
+const pause = () => new Promise(resolve => setTimeout(resolve, 0))
+
+const getNearestStops = (stops: SearchStop[], point: { lat: number; lng: number }, limit: number) => {
+  return stops
+    .map(stop => ({ stop, distance: getDistance(point.lat, point.lng, stop.lat, stop.lng) }))
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, limit)
+    .map(({ stop }) => stop)
+}
+
+const buildRouteStopList = (terminal: APITerminal, route: APIRoute): SearchStop[] => {
+  const routeKey = `${terminal.id}-${route.id}`
+  const geometry = route.polyline && route.polyline.coordinates && route.polyline.coordinates.length > 0
+    ? processGeoJsonCoordinates(route.polyline.coordinates)
+    : route.geometry && route.geometry.length > 0
+      ? route.geometry
+      : undefined
+
+  const stops: SearchStop[] = route.stops.flatMap((stop, index) => {
+    const lat = parseFloat(stop.latitude.toString())
+    const lng = parseFloat(stop.longitude.toString())
+    const time = Math.abs(parseFloat(stop.time.toString()) || 0)
+    const fare = Math.abs(parseFloat(stop.fare.toString()) || 0)
+    const distance = Math.abs(parseDistanceInput(stop.distance ? stop.distance.toString() : '0'))
+    if (isNaN(lat) || isNaN(lng)) return []
+    return [{
+      lat,
+      lng,
+      stopName: stop.stop_name,
+      time,
+      fare,
+      distance,
+      index,
+      routeKey,
+      terminal,
+      route,
+      geometry,
+    }]
+  })
+
+  return stops
+}
+
+const createRouteSegment = (
   terminal: APITerminal,
   route: APIRoute,
-  stops: { lat: number; lng: number; stopName: string; time: number; fare: number; distance: number; index: number; originalStop: APIRoute['stops'][number] }[],
-  origin: { lat: number; lng: number },
-  destination: { lat: number; lng: number },
-  geometry?: [number, number][],
-  reverse = false,
-) {
-  if (stops.length < 2) return null
-
-  const originMatch = getNearestRouteStop(stops, origin)
-  const destinationMatch = getNearestRouteStop(stops, destination)
-  if (!originMatch || !destinationMatch) return null
-
-  const boardIndex = originMatch.stop.index
-  const alightIndex = destinationMatch.stop.index
+  stops: SearchStop[],
+  boardIndex: number,
+  alightIndex: number,
+  geometry?: [number, number][]
+) => {
   if (boardIndex >= alightIndex) return null
-
-  const walkToBoard = originMatch.distance
-  const walkFromAlight = destinationMatch.distance
-  const routeStops = stops.slice(boardIndex, alightIndex + 1)
-
-  const boardStop = routeStops[0]
-  const alightStop = routeStops[routeStops.length - 1]
-
-  const timeDifference = Math.abs(alightStop.time - boardStop.time)
-  const fareDifference = Math.abs(alightStop.fare - boardStop.fare)
-  const distanceDifference = Math.abs(alightStop.distance - boardStop.distance)
-
+  const boardStop = stops[boardIndex]
+  const alightStop = stops[alightIndex]
+  const rideTime = Math.abs(alightStop.time - boardStop.time)
+  const rawFareDiff = Math.abs(alightStop.fare - boardStop.fare)
+  const rideFare = rawFareDiff > 0 ? rawFareDiff : Math.max(Math.abs(alightStop.fare), Math.abs(boardStop.fare))
+  const rideDistance = Math.abs(alightStop.distance - boardStop.distance)
+  const sectionGeometry = geometry && geometry.length > 0 ? trimRouteGeometry(geometry, boardStop, alightStop) : undefined
   const routeName = `${route.mode.mode_name} • ${terminal.name} → ${route.destination_name || alightStop.stopName}`
-
   const steps: RouteStep[] = [
-    { instruction: `Walk ${walkToBoard.toFixed(1)} km to ${boardStop.stopName}`, location: [boardStop.lat, boardStop.lng] },
     { instruction: `Board ${route.mode.mode_name} at ${boardStop.stopName}`, location: [boardStop.lat, boardStop.lng] },
     { instruction: `Ride to ${alightStop.stopName}` },
     { instruction: `Alight at ${alightStop.stopName}`, location: [alightStop.lat, alightStop.lng] },
-    { instruction: `Walk ${walkFromAlight.toFixed(1)} km to destination`, location: [alightStop.lat, alightStop.lng] },
   ]
 
   return {
-    originalId: `${terminal.id}-${route.id}-${reverse ? 'return' : 'forward'}-${boardIndex}-${alightIndex}`,
+    originalId: `${terminal.id}-${route.id}-${boardIndex}-${alightIndex}`,
     name: routeName,
     type: route.mode.mode_name,
-    fare: { regular: fareDifference, discounted: parseFloat((fareDifference * 0.8).toFixed(2)) },
-    time: timeDifference.toString(),
-    distance: distanceDifference.toFixed(1),
+    fare: { regular: rideFare, discounted: parseFloat((rideFare * 0.8).toFixed(2)) },
+    time: rideTime.toString(),
+    distance: rideDistance.toFixed(1),
     start: { id: `${boardStop.index}`, name: boardStop.stopName, lat: boardStop.lat, lng: boardStop.lng },
     end: { id: `${alightStop.index}`, name: alightStop.stopName, lat: alightStop.lat, lng: alightStop.lng },
     steps,
-    geometry: geometry ? (reverse ? [...geometry].reverse() : geometry) : undefined,
-    walkToBoard,
-    walkFromAlight,
-    stops: routeStops.map(stop => ({ name: stop.stopName, lat: stop.lat, lng: stop.lng })),
+    geometry: sectionGeometry,
+    walkToBoard: 0,
+    walkFromAlight: 0,
+    boardIndex,
+    stops: stops.slice(boardIndex, alightIndex + 1).map(stop => ({ name: stop.stopName, lat: stop.lat, lng: stop.lng })),
   } as ExpandedRoute
+}
+
+const computeScore = (segment: ExpandedRoute, walkDistance: number, sortBy: 'time' | 'fare' | 'distance') => {
+  const timeVal = Math.abs(parseFloat(segment.time))
+  const distVal = Math.abs(parseFloat(segment.distance))
+  const fareVal = segment.fare.regular
+  const boardPenalty = (segment.boardIndex ?? 0) * 55
+  const rideReward = Math.min(10, Math.abs(distVal) * 0.45)
+  if (sortBy === 'time') return timeVal + walkDistance * 75 + boardPenalty - rideReward
+  if (sortBy === 'fare') return fareVal + walkDistance * 90 + boardPenalty - rideReward
+  return distVal + walkDistance * 20 + boardPenalty - rideReward
 }
 
 function getModeColor(mode: string) {
@@ -223,7 +315,7 @@ function getModeIconHtml(mode: string) {
     `;
 }
 
-// --- Data Parsing Helpers ---
+ 
 const formatDuration = (minutes: number) => {
     const safeMinutes = Math.abs(Math.round(minutes));
     const hrs = Math.floor(safeMinutes / 60);
@@ -246,8 +338,8 @@ export function MapInterface() {
   const API_BASE_URL = "https://api-lakbayan.onrender.com/api"
 
   const mapContainerRef = useRef<HTMLDivElement>(null)
-  const mapInstanceRef = useRef<Map | null>(null)
-  const [map, setMap] = useState<Map | null>(null)
+  const mapInstanceRef = useRef<Leaflet.Map | null>(null)
+  const [map, setMap] = useState<Leaflet.Map | null>(null)
   const [L, setLeaflet] = useState<typeof Leaflet | null>(null)
   
   const [selectedRoute, setSelectedRoute] = useState<RouteData | null>(null)
@@ -266,9 +358,12 @@ export function MapInterface() {
   
   const [isProfileOpen, setIsProfileOpen] = useState(false)
   const [isLoggedIn, setIsLoggedIn] = useState(false)
+  const [authChecked, setAuthChecked] = useState(false)
   const [username, setUsername] = useState("User")
   
   const [maxWalkInput, setMaxWalkInput] = useState("2 km")
+  const [maxWalkLegInput, setMaxWalkLegInput] = useState("1 km")
+  const [maxTransferWalkInput, setMaxTransferWalkInput] = useState("0.5 km")
   const [transfersInput, setTransfersInput] = useState("2")
   const [sortBy, setSortBy] = useState<'time' | 'fare' | 'distance'>('time')
   const [selectedModes, setSelectedModes] = useState<string[]>(['bus', 'train', 'jeep', 'tricycle'])
@@ -281,16 +376,33 @@ export function MapInterface() {
   const terminalPreviewRef = useRef<(Polyline | CircleMarker)[]>([])
   const terminalMarkersRef = useRef<Marker[]>([])
 
-  const availableModes = [
-      { id: 'bus', label: 'Bus', color: 'bg-red-500' },
-      { id: 'jeep', label: 'Jeep', color: 'bg-green-500' },
-      { id: 'train', label: 'Train', color: 'bg-amber-500' },
-      { id: 'tricycle', label: 'Tricycle', color: 'bg-purple-500' },
-  ]
+  const availableModes = useMemo(() => {
+      const modeMap = new Map<string, { id: string; label: string; color: string }>()
+      terminalsData.forEach(t => {
+        t.routes?.forEach(route => {
+          const id = route.mode.mode_name.toLowerCase().trim()
+          if (!modeMap.has(id)) {
+            modeMap.set(id, { id, label: route.mode.mode_name, color: getModeColor(route.mode.mode_name) })
+          }
+        })
+      })
+      const order = ['bus', 'jeep', 'train', 'tricycle']
+      return Array.from(modeMap.values()).sort((a, b) => {
+        const ai = order.indexOf(a.id)
+        const bi = order.indexOf(b.id)
+        if (ai === -1 && bi === -1) return a.label.localeCompare(b.label)
+        if (ai === -1) return 1
+        if (bi === -1) return -1
+        return ai - bi
+      })
+  }, [terminalsData])
+
+  const router = useRouter()
 
   useEffect(() => {
     const token = localStorage.getItem("accessToken")
     setIsLoggedIn(!!token)
+    setAuthChecked(true)
     
     const userStr = localStorage.getItem("user")
     if (userStr) {
@@ -302,6 +414,12 @@ export function MapInterface() {
       }
     }
   }, [])
+
+  useEffect(() => {
+    if (authChecked && !isLoggedIn) {
+      router.push('/auth')
+    }
+  }, [authChecked, isLoggedIn, router])
 
   const handleLogout = () => {
     localStorage.removeItem("accessToken")
@@ -317,6 +435,17 @@ export function MapInterface() {
   }
 
   useEffect(() => {
+      if (availableModes.length === 0) return
+      setSelectedModes(prev => {
+        const next = [...prev]
+        availableModes.forEach(mode => {
+          if (!next.includes(mode.id)) next.push(mode.id)
+        })
+        return next
+      })
+  }, [availableModes])
+
+  useEffect(() => {
       if (!map || !L || terminalsData.length === 0) return;
       
       const renderMarkers = () => {
@@ -326,9 +455,11 @@ export function MapInterface() {
           terminalMarkersRef.current = [];
 
           terminalsData.forEach(t => {
-              const activeRoutes = t.routes ? t.routes.filter(r => 
-                  selectedModes.some(m => r.mode.mode_name.toLowerCase().includes(m))
-              ) : [];
+              const activeRoutes = t.routes ? t.routes.filter(r => {
+                  if (!selectedModes.some(m => r.mode.mode_name.toLowerCase().includes(m))) return false;
+                  if (!r.stops || r.stops.length < 2) return false;
+                  return true;
+              }) : [];
               
               if (activeRoutes.length > 0) {
                   addTerminalMarker(L, map, t, activeRoutes);
@@ -341,7 +472,7 @@ export function MapInterface() {
 
   }, [selectedModes, map, L, terminalsData])
 
-  const addTerminalMarker = (LeafletLib: typeof Leaflet, mapInstance: Map, t: APITerminal, activeRoutes: APIRoute[]) => {
+  const addTerminalMarker = (LeafletLib: typeof Leaflet, mapInstance: Leaflet.Map, t: APITerminal, activeRoutes: APIRoute[]) => {
       let primaryMode = '';
       
       if (activeRoutes.length > 0) {
@@ -372,7 +503,7 @@ export function MapInterface() {
       terminalMarkersRef.current.push(marker);
 
       const routesListHtml = activeRoutes.map(r => {
-          if (!r.stops || r.stops.length === 0) return '';
+          if (!r.stops || r.stops.length < 2) return '';
           
           const endStop = r.stops[r.stops.length - 1];
           const fare = Math.abs(parseFloat(endStop.fare.toString()) || 0).toFixed(2);
@@ -439,7 +570,8 @@ export function MapInterface() {
               const lineColor = getModeColor(r.mode.mode_name);
               
               if (pathCoords.length > 0) {
-                  const line = LeafletLib.polyline(pathCoords, { color: lineColor, weight: 4, opacity: 0.8 }).addTo(mapInstance)
+                  const trimmedPath = trimRouteGeometry(pathCoords, { lat, lng }, { lat: endCoords[0], lng: endCoords[1] })
+                  const line = LeafletLib.polyline(trimmedPath, { color: lineColor, weight: 4, opacity: 0.8 }).addTo(mapInstance)
                   terminalPreviewRef.current.push(line)
               } else {
                   const simpleLine = LeafletLib.polyline([[lat, lng], endCoords], { color: lineColor, weight: 4, dashArray: '10, 10', opacity: 0.6 }).addTo(mapInstance)
@@ -632,6 +764,10 @@ export function MapInterface() {
 
   const handleSearch = async () => {
     if (!fromLocation || !toLocation || !map || !L || !ready) return
+    if (!isLoggedIn) {
+      router.push('/auth')
+      return
+    }
     setIsSearching(true)
     
     if (routeLayersRef.current.length > 0) {
@@ -644,6 +780,7 @@ export function MapInterface() {
     }
     setContributionLocation(null);
     setSelectedRoute(null)
+    setSuggestionMessage(null)
 
     try {
       let fromCoords = pinnedStart
@@ -652,278 +789,304 @@ export function MapInterface() {
       if (!toCoords || toLocation !== toCoords.name) toCoords = await geocodeLocation(toLocation)
 
       if (!fromCoords || !toCoords) {
-        alert("Locations not found.")
+        setSuggestionMessage("Locations not found. Please check your From/To entries and try again.")
         setIsSearching(false)
         return
       }
 
-      const maxWalkKm = parseDistanceInput(maxWalkInput);
-      const limitTransfers = parseInt(transfersInput) || 2;
-      const allSegments: ExpandedRoute[] = []
+      const maxWalkKm = parseDistanceInput(maxWalkInput)
+      const maxWalkLegKm = parseDistanceInput(maxWalkLegInput)
+      const maxTransferWalkKm = parseDistanceInput(maxTransferWalkInput)
+      const parsedTransfers = parseInt(transfersInput, 10)
+      const limitTransfers = Number.isNaN(parsedTransfers) ? 2 : parsedTransfers
+      const allStops: SearchStop[] = []
+      const stopsByRoute = new Map<string, SearchStop[]>()
       let closestCandidate: { route: ExpandedRoute; totalWalk: number } | null = null
+      const updateClosestCandidate = (candidate: { route: ExpandedRoute; totalWalk: number }) => {
+        if (!closestCandidate || candidate.totalWalk < closestCandidate.totalWalk) {
+          closestCandidate = candidate
+        }
+      }
 
       terminalsData.forEach(terminal => {
-          terminal.routes.forEach(route => {
-              if (!route.stops || route.stops.length === 0) return
-              if (!selectedModes.some(m => route.mode.mode_name.toLowerCase().includes(m))) return
-
-              const routeStops = route.stops
-                .map((stop, index) => {
-                  const lat = parseFloat(stop.latitude.toString())
-                  const lng = parseFloat(stop.longitude.toString())
-                  const time = Math.abs(parseFloat(stop.time.toString()) || 0)
-                  const fare = Math.abs(parseFloat(stop.fare.toString()) || 0)
-                  const distance = Math.abs(parseDistanceInput(stop.distance ? stop.distance.toString() : '0'))
-                  if (isNaN(lat) || isNaN(lng)) return null
-                  return {
-                    lat,
-                    lng,
-                    stopName: stop.stop_name,
-                    time,
-                    fare,
-                    distance,
-                    index,
-                    originalStop: stop,
-                  }
-                })
-                .filter(Boolean) as { lat: number; lng: number; stopName: string; time: number; fare: number; distance: number; index: number; originalStop: APIRoute['stops'][number] }[]
-
-              if (routeStops.length < 2) return
-
-              let geometry: [number, number][] | undefined = undefined
-              if (route.polyline && route.polyline.coordinates && route.polyline.coordinates.length > 0) {
-                  geometry = processGeoJsonCoordinates(route.polyline.coordinates)
-              } else if (route.geometry && route.geometry.length > 0) {
-                  geometry = route.geometry
-              }
-
-              const forwardCandidate = createRouteCandidate(terminal, route, routeStops, fromCoords, toCoords, geometry, false)
-              const reverseCandidate = createRouteCandidate(terminal, route, [...routeStops].reverse().map((stop, idx) => ({ ...stop, index: idx })), fromCoords, toCoords, geometry, true)
-
-              if (forwardCandidate) allSegments.push(forwardCandidate)
-              if (reverseCandidate) allSegments.push(reverseCandidate)
-          })
+        terminal.routes.forEach(route => {
+          if (!route.stops || route.stops.length < 2) return
+          if (!selectedModes.some(m => route.mode.mode_name.toLowerCase().includes(m))) return
+          const routeStops = buildRouteStopList(terminal, route)
+          if (routeStops.length < 2) return
+          stopsByRoute.set(routeStops[0]?.routeKey ?? `${terminal.id}-${route.id}`, routeStops)
+          allStops.push(...routeStops)
+        })
       })
 
+      await pause()
+      if (allStops.length === 0) {
+        setSuggestionMessage("No available routes for the selected transport modes. Try enabling more modes or increasing max walk.")
+        setIsSearching(false)
+        return
+      }
+
+      const originStopsByRoute = new Map<string, { stop: SearchStop; walk: number }[]>()
+      allStops.forEach(stop => {
+        const walkToBoard = getDistance(fromCoords.lat, fromCoords.lng, stop.lat, stop.lng)
+        if (walkToBoard > maxWalkLegKm) return
+        const list = originStopsByRoute.get(stop.routeKey) ?? []
+        list.push({ stop, walk: walkToBoard })
+        originStopsByRoute.set(stop.routeKey, list)
+      })
+
+      const originStops = Array.from(originStopsByRoute.values())
+        .flatMap(routeEntries => {
+          routeEntries.sort((a, b) => a.walk - b.walk || a.stop.index - b.stop.index)
+          const closestWalk = routeEntries[0]?.walk ?? Infinity
+          const maxAllowedWalk = Math.max(closestWalk + 0.15, closestWalk * 1.2)
+          const candidates = routeEntries
+            .filter(entry => entry.walk <= maxAllowedWalk)
+            .sort((a, b) => a.stop.index - b.stop.index || a.walk - b.walk)
+          return candidates.slice(0, 1).map(entry => entry.stop)
+        })
+        .sort((a, b) => a.index - b.index || getDistance(fromCoords.lat, fromCoords.lng, a.lat, a.lng) - getDistance(fromCoords.lat, fromCoords.lng, b.lat, b.lng))
+
+      const queue: SearchState[] = []
+      const bestStateScore = new Map<string, number>()
       let bestPath: BestPath | null = null
       let bestScore = Infinity
 
-      for (const segment of allSegments) {
-        const d1 = getDistance(fromCoords.lat, fromCoords.lng, segment.start.lat, segment.start.lng)
-        const d2 = getDistance(segment.end.lat, segment.end.lng, toCoords.lat, toCoords.lng)
-        const totalWalk = d1 + d2
-
-        if (!closestCandidate || totalWalk < closestCandidate.totalWalk) {
-          closestCandidate = { route: segment, totalWalk }
-        }
-
-        if (totalWalk <= maxWalkKm) {
-            const timeVal = Math.abs(parseFloat(segment.time))
-            const distVal = Math.abs(parseFloat(segment.distance))
-            const fareVal = segment.fare.regular
-            
-            let score = 0
-            if (sortBy === 'time') score = timeVal + (totalWalk * 12)
-            else if (sortBy === 'fare') score = fareVal + (totalWalk * 10)
-            else score = distVal + totalWalk
-
-            if (score < bestScore) {
-                bestScore = score
-                bestPath = { type: "direct", segments: [segment], walks: [d1, d2] }
-            }
-        }
+      const estimateWalkPenalty = (walkDistance: number) => {
+        if (sortBy === 'time') return walkDistance * 55
+        if (sortBy === 'fare') return walkDistance * 65
+        return walkDistance * 12
       }
 
-      if (limitTransfers >= 1) {
-        for (const r1 of allSegments) {
-            const dStart = getDistance(fromCoords.lat, fromCoords.lng, r1.start.lat, r1.start.lng)
-            for (const r2 of allSegments) {
-                if (r1.originalId === r2.originalId) continue
-                const dTransfer = getDistance(r1.end.lat, r1.end.lng, r2.start.lat, r2.start.lng)
-                const dEnd = getDistance(r2.end.lat, r2.end.lng, toCoords.lat, toCoords.lng)
-                const totalWalk = dStart + dTransfer + dEnd
-
-                if (totalWalk <= maxWalkKm) {
-                    const timeVal = Math.abs(parseFloat(r1.time)) + Math.abs(parseFloat(r2.time))
-                    const fareVal = r1.fare.regular + r2.fare.regular
-                    const distVal = Math.abs(parseFloat(r1.distance)) + Math.abs(parseFloat(r2.distance))
-
-                    let score = 0
-                    if (sortBy === 'time') score = timeVal + (totalWalk * 12)
-                    else if (sortBy === 'fare') score = fareVal + (totalWalk * 10)
-                    else score = distVal + totalWalk
-
-                    if (score < bestScore) {
-                        bestScore = score
-                        bestPath = { type: "transfer", segments: [r1, r2], walks: [dStart, dTransfer, dEnd] }
-                    }
-                }
-                
-                if (limitTransfers >= 2) {
-                     for (const r3 of allSegments) {
-                         if (r2.originalId === r3.originalId || r1.originalId === r3.originalId) continue
-                         const dTransfer2 = getDistance(r2.end.lat, r2.end.lng, r3.start.lat, r3.start.lng)
-                         const dEnd2 = getDistance(r3.end.lat, r3.end.lng, toCoords.lat, toCoords.lng)
-                         const totalWalk3 = dStart + dTransfer + dTransfer2 + dEnd2
-
-                         if (totalWalk3 <= maxWalkKm) {
-                             const timeVal3 = Math.abs(parseFloat(r1.time)) + Math.abs(parseFloat(r2.time)) + Math.abs(parseFloat(r3.time))
-                             const fareVal3 = r1.fare.regular + r2.fare.regular + r3.fare.regular
-                             const distVal3 = Math.abs(parseFloat(r1.distance)) + Math.abs(parseFloat(r2.distance)) + Math.abs(parseFloat(r3.distance))
-
-                             let score3 = 0
-                             if (sortBy === 'time') score3 = timeVal3 + (totalWalk3 * 12)
-                             else if (sortBy === 'fare') score3 = fareVal3 + (totalWalk3 * 10)
-                             else score3 = distVal3 + totalWalk3
-
-                             if (score3 < bestScore) {
-                                bestScore = score3
-                                bestPath = { type: "multi-transfer", segments: [r1, r2, r3], walks: [dStart, dTransfer, dTransfer2, dEnd2] }
-                             }
-                         }
-                     }
-                }
-            }
-        }
+      const estimateStatePriority = (routeStops: SearchStop[], state: SearchState) => {
+        const currentStop = routeStops[state.alightIndex]
+        const finishDistance = getDistance(currentStop.lat, currentStop.lng, toCoords.lat, toCoords.lng)
+        return state.score + estimateWalkPenalty(finishDistance) + state.transfers * 12
       }
 
-      if (!bestPath && closestCandidate) {
-          bestPath = { type: "suggestion", segments: [closestCandidate.route], walks: [closestCandidate.route.walkToBoard ?? 0, closestCandidate.route.walkFromAlight ?? 0] }
-          setSuggestionMessage(`No route found within ${maxWalkInput}. Closest option is ${closestCandidate.route.name} with ${closestCandidate.totalWalk.toFixed(1)} km of walking. Try increasing max walk or adding another transfer.`)
+      const enqueueState = (state: SearchState) => {
+        const key = `${state.routeKey}:${state.boardIndex}:${state.alightIndex}:${state.transfers}`
+        const routeStops = stopsByRoute.get(state.routeKey)
+        if (!routeStops) return
+        const priority = estimateStatePriority(routeStops, state)
+        if ((bestStateScore.get(key) ?? Infinity) <= priority) return
+        bestStateScore.set(key, priority)
+        queue.push({ ...state, priority })
+      }
+
+      originStops.forEach(stop => {
+        const routeStops = stopsByRoute.get(stop.routeKey)
+        if (!routeStops) return
+        for (let nextIndex = stop.index + 1; nextIndex < routeStops.length; nextIndex++) {
+          const segment = createRouteSegment(stop.terminal, stop.route, routeStops, stop.index, nextIndex, stop.geometry)
+          if (!segment) continue
+          const walkToBoard = getDistance(fromCoords.lat, fromCoords.lng, segment.start.lat, segment.start.lng)
+          const walkToDestination = getDistance(segment.end.lat, segment.end.lng, toCoords.lat, toCoords.lng)
+          const totalWalk = walkToBoard + walkToDestination
+          updateClosestCandidate({ route: segment, totalWalk })
+          if (walkToBoard > maxWalkLegKm || walkToDestination > maxWalkLegKm || totalWalk > maxWalkKm) continue
+          const score = computeScore(segment, totalWalk, sortBy)
+          const finishScore = score
+          if (finishScore < bestScore) {
+            bestScore = finishScore
+            bestPath = { type: "direct", segments: [segment], walks: [walkToBoard, walkToDestination] }
+          }
+          enqueueState({ routeKey: stop.routeKey, boardIndex: stop.index, alightIndex: nextIndex, transfers: 0, score, walks: [walkToBoard], segments: [segment] })
+        }
+      })
+
+      let iteration = 0
+      while (queue.length > 0) {
+        if (++iteration % 100 === 0) await pause()
+        queue.sort((a, b) => (a.priority ?? a.score) - (b.priority ?? b.score))
+        const state = queue.shift()
+        if (!state) break
+        const routeStops = stopsByRoute.get(state.routeKey)
+        if (!routeStops) continue
+        const currentStop = routeStops[state.alightIndex]
+        const estimatePriority = estimateStatePriority(routeStops, state)
+        if (estimatePriority >= bestScore) continue
+        const finishDistance = getDistance(currentStop.lat, currentStop.lng, toCoords.lat, toCoords.lng)
+        const totalWalkSoFar = state.walks.reduce((sum, value) => sum + value, 0) + finishDistance
+        updateClosestCandidate({ route: state.segments[state.segments.length - 1], totalWalk: totalWalkSoFar })
+        if (finishDistance <= maxWalkLegKm && totalWalkSoFar <= maxWalkKm) {
+          const finishScore = state.score + estimateWalkPenalty(finishDistance)
+          if (finishScore < bestScore) {
+            bestScore = finishScore
+            bestPath = { type: state.transfers === 0 ? "direct" : state.transfers === 1 ? "transfer" : "multi-transfer", segments: state.segments, walks: [...state.walks, finishDistance] }
+          }
+        }
+        if (state.transfers >= limitTransfers) continue
+        const transferStops = getNearestStops(allStops.filter(stop => stop.routeKey !== state.routeKey), currentStop, 16)
+        transferStops.forEach(transferStop => {
+          const transferWalk = getDistance(currentStop.lat, currentStop.lng, transferStop.lat, transferStop.lng)
+          if (transferWalk > maxTransferWalkKm || transferWalk > maxWalkLegKm) return
+          const nextRouteStops = stopsByRoute.get(transferStop.routeKey)
+          if (!nextRouteStops) return
+          for (let nextIndex = transferStop.index + 1; nextIndex < nextRouteStops.length; nextIndex++) {
+            const segment = createRouteSegment(transferStop.terminal, transferStop.route, nextRouteStops, transferStop.index, nextIndex, transferStop.geometry)
+            if (!segment) continue
+            const score = state.score + computeScore(segment, transferWalk, sortBy)
+            const key = `${transferStop.routeKey}:${transferStop.index}:${nextIndex}:${state.transfers + 1}`
+            if ((bestStateScore.get(key) ?? Infinity) <= score) continue
+            enqueueState({ routeKey: transferStop.routeKey, boardIndex: transferStop.index, alightIndex: nextIndex, transfers: state.transfers + 1, score, walks: [...state.walks, transferWalk], segments: [...state.segments, segment] })
+          }
+        })
+      }
+
+      if (!bestPath && closestCandidate !== null) {
+        const candidate = closestCandidate as { route: ExpandedRoute; totalWalk: number }
+        const seg = candidate.route
+        const candFare = Math.max(11, Math.abs(Number(seg.fare?.regular) || 0))
+        const candDist = Math.abs(Number(parseFloat(String(seg.distance || '0')) || 0))
+        const candTime = Math.round(Math.abs(Number(parseFloat(String(seg.time || '0')) || 0)))
+
+        setSelectedRoute({
+          id: seg.originalId || `suggest-${seg.name}`,
+          name: seg.name,
+          type: seg.type,
+          fare: { regular: candFare, discounted: Number((candFare * 0.8).toFixed(2)) },
+          distance: Number(candDist.toFixed(1)),
+          time: candTime,
+          duration: candTime,
+          steps: seg.steps ?? [],
+        } as RouteData)
+
+        setSuggestionMessage(`No route found within ${maxWalkInput}. Showing closest option with ${candidate.totalWalk.toFixed(1)} km walking. Adjust walk limits or transfers to find alternatives.`)
       } else {
-          setSuggestionMessage(null)
+        setSuggestionMessage(null)
       }
 
       if (bestPath) {
-        userMarkersRef.current.forEach(m => map.removeLayer(m));
-        const boundsArray: Array<[number, number]> = [];
+        userMarkersRef.current.forEach(m => map.removeLayer(m))
+        const segmentGeometries = await Promise.all(bestPath.segments.map(seg => seg.geometry ? Promise.resolve(seg.geometry) : fetchRouteGeometry(seg.start, seg.end, 'driving')))
+        const boundsArray: Array<[number, number]> = []
         const steps: RouteStep[] = []
         let totalFare = 0
         let totalDist = 0
         let totalTime = 0
-        let totalWalkDistance = 0
-        
-        const drawSegment = async (segment: ExpandedRoute | null, start: {lat: number, lng: number}, end: {lat: number, lng: number}, type: 'walk' | 'ride', color: string, dash: string | null) => {
-             let geometry: [number, number][] | null = null;
-             
-             if (type === 'ride' && segment?.geometry && segment.geometry.length > 0) {
-                 geometry = segment.geometry;
-             } else {
-                 const profile = type === 'walk' ? 'walking' : 'driving';
-                 geometry = await fetchRouteGeometry(start, end, profile);
-             }
-             
-             let layer;
-             if (geometry) {
-                 layer = L.polyline(geometry, { color, weight: type === 'ride' ? 5 : 4, dashArray: dash || undefined, opacity: 0.8 }).addTo(map);
-             } else {
-                 layer = L.polyline([[start.lat, start.lng], [end.lat, end.lng]], { color, weight: type === 'ride' ? 5 : 4, dashArray: dash || undefined, opacity: 0.8 }).addTo(map);
-             }
-             routeLayersRef.current.push(layer);
-             
-             if (geometry) {
-                 boundsArray.push(...geometry);
-             } else {
-                 boundsArray.push([start.lat, start.lng], [end.lat, end.lng]);
-             }
+
+        const drawSegment = async (segment: ExpandedRoute | null, start: { lat: number; lng: number }, end: { lat: number; lng: number }, type: 'walk' | 'ride', color: string, dash: string | null, weight?: number, opacity?: number, geometry?: [number, number][]) => {
+          const lineWeight = weight ?? (type === 'ride' ? 6 : 3)
+          const lineOpacity = opacity ?? (type === 'ride' ? 1 : 0.35)
+          let routeGeometry: [number, number][]
+
+          if (type === 'walk') {
+            const walkGeometry = await fetchRouteGeometry(start, end, 'walking')
+            routeGeometry = walkGeometry && walkGeometry.length > 0 ? walkGeometry : [[start.lat, start.lng], [end.lat, end.lng]]
+          } else {
+            routeGeometry = geometry && geometry.length > 0
+              ? geometry
+              : segment?.geometry && segment.geometry.length > 0
+                ? segment.geometry
+                : [[start.lat, start.lng], [end.lat, end.lng]]
+          }
+
+          if (geometry && geometry.length > 0) {
+            routeGeometry = trimRouteGeometry(geometry, start, end)
+          } else if (segment?.geometry && segment.geometry.length > 0) {
+            routeGeometry = trimRouteGeometry(segment.geometry, start, end)
+          }
+
+          if (type === 'ride') {
+            const backLayer = L.polyline(routeGeometry, { color: '#2563eb', weight: lineWeight + 4, opacity: 0.18, dashArray: dash || undefined }).addTo(map)
+            routeLayersRef.current.push(backLayer)
+          }
+          const layer = L.polyline(routeGeometry, { color, weight: lineWeight, dashArray: dash || undefined, opacity: lineOpacity }).addTo(map)
+          routeLayersRef.current.push(layer)
+          boundsArray.push(...routeGeometry)
         }
 
-        // --- Start Walk ---
-        const walk1Dist = bestPath.walks[0];
-        await drawSegment(null, fromCoords, bestPath.segments[0].start, 'walk', '#64748b', '10, 10');
-        steps.push({ instruction: `Walk ${walk1Dist.toFixed(1)}km to ${bestPath.segments[0].start.name}` })
-        totalDist += walk1Dist;
-        totalWalkDistance += walk1Dist;
+        const walk1Dist = bestPath.walks[0]
+        const walk1Duration = walk1Dist * 12
+        if (walk1Dist > 0.03) {
+          await drawSegment(null, fromCoords, bestPath.segments[0].start, 'walk', '#94a3b8', '4, 8', 3, 0.25)
+          steps.push({ instruction: `Walk ${walk1Dist.toFixed(1)}km to ${bestPath.segments[0].start.name}`, distance: walk1Dist, duration: walk1Duration, location: [bestPath.segments[0].start.lat, bestPath.segments[0].start.lng] })
+          totalDist += walk1Dist
+          totalTime += walk1Duration
+        } else {
+          steps.push({ instruction: `Board ${bestPath.segments[0].type} at ${bestPath.segments[0].start.name}`, location: [bestPath.segments[0].start.lat, bestPath.segments[0].start.lng] })
+        }
 
         for (let i = 0; i < bestPath.segments.length; i++) {
-            const seg = bestPath.segments[i]
-            totalFare += seg.fare.regular
-            totalDist += Math.abs(parseFloat(seg.distance))
-            totalTime += Math.abs(parseFloat(seg.time))
-            steps.push({ instruction: `Ride ${seg.type} (${seg.name})` })
-            
-            const modeColor = getModeColor(seg.type);
-            const modeIconHtml = getModeIconHtml(seg.type);
-            const modeIcon = L.divIcon({ className: '', html: modeIconHtml, iconSize: [32, 32], iconAnchor: [16, 16] });
-            const modeMarker = L.marker([seg.start.lat, seg.start.lng], { icon: modeIcon }).addTo(map);
-            routeLayersRef.current.push(modeMarker);
-
-            await drawSegment(seg, seg.start, seg.end, 'ride', modeColor, null);
-            
-            if (seg.stops && seg.stops.length > 0) {
-                seg.stops.forEach((station) => {
-                    const stopMarker = L.circleMarker([station.lat, station.lng], {
-                        radius: 3,
-                        fillColor: "#ffffff",
-                        color: modeColor,
-                        weight: 2,
-                        fillOpacity: 1,
-                    }).addTo(map)
-                    stopMarker.bindTooltip(station.name, { direction: "top", offset: [0, -5], className: "font-sans text-xs font-bold" })
-                    routeLayersRef.current.push(stopMarker)
-                })
-            }
-
-            if (seg.steps && seg.steps.length > 0) {
-                 seg.steps.forEach(step => {
-                     if (step.location) {
-                         const stopMarker = L.circleMarker(step.location, {
-                             radius: 4, fillColor: "white", color: modeColor, weight: 2, fillOpacity: 1
-                         }).addTo(map)
-                         stopMarker.bindTooltip(step.instruction, { direction: "top", offset: [0, -5], className: "font-sans text-xs font-bold" })
-                         routeLayersRef.current.push(stopMarker)
-                     }
-                 })
-            }
-
-            if (i < bestPath.segments.length - 1) {
-                const transferWalk = bestPath.walks[i+1]
-                const nextSeg = bestPath.segments[i+1]
-                totalDist += transferWalk
-                totalWalkDistance += transferWalk;
-                steps.push({ instruction: `Alight at ${seg.end.name}, Walk ${transferWalk.toFixed(1)}km to ${nextSeg.start.name}` })
-                await drawSegment(null, seg.end, nextSeg.start, 'walk', '#64748b', '10, 10');
-            }
+          const seg = bestPath.segments[i]
+          const rideDistance = Math.abs(parseFloat(seg.distance))
+          const rideDuration = Math.abs(parseFloat(seg.time))
+          totalFare += Math.abs(seg.fare.regular)
+          totalDist += rideDistance
+          totalTime += rideDuration
+          steps.push({ instruction: `Ride ${seg.type} (${seg.name})`, distance: rideDistance, duration: rideDuration, location: [seg.start.lat, seg.start.lng] })
+          const modeColor = getModeColor(seg.type)
+          const modeIconHtml = getModeIconHtml(seg.type)
+          const modeIcon = L.divIcon({ className: '', html: modeIconHtml, iconSize: [32, 32], iconAnchor: [16, 16] })
+          const iconLocation = [seg.start.lat, seg.start.lng]
+          const modeMarker = L.marker(iconLocation as [number, number], { icon: modeIcon }).addTo(map)
+          routeLayersRef.current.push(modeMarker)
+          await drawSegment(seg, seg.start, seg.end, 'ride', modeColor, null, undefined, undefined, segmentGeometries[i] ?? undefined)
+          if (seg.stops && seg.stops.length > 0) {
+            seg.stops.forEach(station => {
+              const stopMarker = L.circleMarker([station.lat, station.lng], { radius: 3, fillColor: '#ffffff', color: modeColor, weight: 2, fillOpacity: 1 }).addTo(map)
+              stopMarker.bindTooltip(station.name, { direction: 'top', offset: [0, -5], className: 'font-sans text-xs font-bold' })
+              routeLayersRef.current.push(stopMarker)
+            })
+          }
+          if (seg.steps && seg.steps.length > 0) {
+            seg.steps.forEach(step => {
+              if (step.location) {
+                const stopMarker = L.circleMarker(step.location, { radius: 4, fillColor: 'white', color: modeColor, weight: 2, fillOpacity: 1 }).addTo(map)
+                stopMarker.bindTooltip(step.instruction, { direction: 'top', offset: [0, -5], className: 'font-sans text-xs font-bold' })
+                routeLayersRef.current.push(stopMarker)
+              }
+            })
+          }
+          if (i < bestPath.segments.length - 1) {
+            const transferWalk = bestPath.walks[i + 1]
+            const transferDuration = transferWalk * 12
+            const nextSeg = bestPath.segments[i + 1]
+            totalDist += transferWalk
+            totalTime += transferDuration
+            steps.push({ instruction: `Alight at ${seg.end.name}, Walk ${transferWalk.toFixed(1)}km to ${nextSeg.start.name}`, distance: transferWalk, duration: transferDuration, location: [seg.end.lat, seg.end.lng] })
+            await drawSegment(null, seg.end, nextSeg.start, 'walk', '#64748b', '10, 10')
+          }
         }
 
-        // --- End Walk ---
-        const lastWalk = bestPath.walks[bestPath.walks.length - 1];
-        const lastSeg = bestPath.segments[bestPath.segments.length - 1];
-        await drawSegment(null, lastSeg.end, toCoords, 'walk', '#64748b', '10, 10');
-        
-        totalDist += lastWalk
-        totalWalkDistance += lastWalk;
-        steps.push({ instruction: `Alight at ${lastSeg.end.name}, Walk ${lastWalk.toFixed(1)}km to Destination` })
+        const lastWalk = bestPath.walks[bestPath.walks.length - 1]
+        const lastSeg = bestPath.segments[bestPath.segments.length - 1]
+        const lastWalkDuration = lastWalk * 12
+        if (lastWalk > 0.03) {
+          await drawSegment(null, lastSeg.end, toCoords, 'walk', '#94a3b8', '4, 8', 3, 0.25)
+          totalDist += lastWalk
+          totalTime += lastWalkDuration
+          steps.push({ instruction: `Alight at ${lastSeg.end.name}, Walk ${lastWalk.toFixed(1)}km to Destination`, distance: lastWalk, duration: lastWalkDuration, location: [lastSeg.end.lat, lastSeg.end.lng] })
+        } else {
+          steps.push({ instruction: `Finish at Destination`, location: [lastSeg.end.lat, lastSeg.end.lng] })
+        }
 
-        const startMarker = L.marker([fromCoords.lat, fromCoords.lng], {
-            icon: L.divIcon({ className: '', html: `<div style="width:16px;height:16px;background-color:#22c55e;border:2px solid white;border-radius:50%;box-shadow:0 2px 4px rgba(0,0,0,0.3);"></div>`, iconSize: [16,16] })
-        }).addTo(map).bindPopup("Start");
-        
-        const endMarker = L.marker([toCoords.lat, toCoords.lng], {
-            icon: L.divIcon({ className: '', html: `<div style="width:16px;height:16px;background-color:#ef4444;border:2px solid white;border-radius:50%;box-shadow:0 2px 4px rgba(0,0,0,0.3);"></div>`, iconSize: [16,16] })
-        }).addTo(map).bindPopup("Destination");
-        
-        routeLayersRef.current.push(startMarker, endMarker);
+        const endMarker = L.marker([toCoords.lat, toCoords.lng], { icon: L.divIcon({ className: '', html: `<div style="width:16px;height:16px;background-color:#ef4444;border:2px solid white;border-radius:50%;box-shadow:0 2px 4px rgba(0,0,0,0.3);"></div>`, iconSize: [16, 16] }) }).addTo(map).bindPopup('Destination')
+        routeLayersRef.current.push(endMarker)
 
         if (boundsArray.length > 0) {
-            map.fitBounds(boundsArray, { padding: [50, 50] });
+          map.fitBounds(boundsArray, { padding: [50, 50] })
         }
 
-        // Final Time Calculation: Sum of Transit Time + Total Walk Time (12 mins per km)
-        const finalTimeMins = totalTime + Math.round(totalWalkDistance * 12);
+        const finalTimeMins = Math.round(totalTime)
+        const finalFare = Math.max(11, totalFare)
 
         setSelectedRoute({
-            id: `multi-${bestPath.type}`,
-            name: `Trip to ${toLocation.split(',')[0]}`,
-            type: `${bestPath.segments.length} Ride(s)`,
-            fare: { regular: totalFare, discounted: totalFare * 0.8 },
-            distance: `${totalDist.toFixed(1)} km`,
-            time: `${finalTimeMins} min`, 
-            steps: steps
+          id: `multi-${bestPath.type}`,
+          name: `Trip to ${toLocation.split(',')[0]}`,
+          type: `${bestPath.segments.length} Ride(s)`,
+          fare: { regular: finalFare, discounted: Number((finalFare * 0.8).toFixed(2)) },
+          distance: Number(totalDist.toFixed(1)),
+          time: finalTimeMins,
+          duration: finalTimeMins,
+          steps: steps,
         } as RouteData)
-
       } else {
-        alert("No suitable transit route found.")
+        if (!closestCandidate) {
+          setSuggestionMessage("No suitable transit route found. Try widening walking limits or allowing more transfers.")
+        }
+        setIsSearching(false)
       }
     } catch (error) {
       console.error(error)
@@ -1072,14 +1235,28 @@ export function MapInterface() {
 
                 <div className="grid grid-cols-2 gap-3">
                     <div>
-                         <Label className="text-xs font-semibold text-slate-600 mb-1 block">Max Walk</Label>
-                         <Input value={maxWalkInput} onChange={(e) => setMaxWalkInput(e.target.value)} className="h-8 text-xs"/>
+                         <Label className="text-xs font-semibold text-slate-600 mb-1 block" title="Total walk budget for the whole trip">Max Walk</Label>
+                         <Input value={maxWalkInput} onChange={(e) => setMaxWalkInput(e.target.value)} className="h-8 text-xs" title="Total walk budget for the whole trip" />
+                         <p className="mt-1 text-[11px] text-slate-500">Total walking allowed across all legs.</p>
                     </div>
                     <div>
-                         <Label className="text-xs font-semibold text-slate-600 mb-1 block">Max Transfers</Label>
-                         <Input type="number" min="0" max="10" value={transfersInput} onChange={(e) => setTransfersInput(e.target.value)} className="h-8 text-xs"/>
+                         <Label className="text-xs font-semibold text-slate-600 mb-1 block" title="Maximum number of transfers allowed for a route">Max Transfers</Label>
+                         <Input type="number" min="0" max="10" value={transfersInput} onChange={(e) => setTransfersInput(e.target.value)} className="h-8 text-xs" title="Maximum number of transfers allowed" />
                     </div>
                 </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                    <div>
+                         <Label className="text-xs font-semibold text-slate-600 mb-1 block" title="Maximum distance for a single walk leg">Max Single Walk</Label>
+                         <Input value={maxWalkLegInput} onChange={(e) => setMaxWalkLegInput(e.target.value)} className="h-8 text-xs" title="Maximum distance for a single walk leg" />
+                    </div>
+                    <div>
+                         <Label className="text-xs font-semibold text-slate-600 mb-1 block" title="Maximum walk distance allowed between transfers">Max Transfer Walk</Label>
+                         <Input value={maxTransferWalkInput} onChange={(e) => setMaxTransferWalkInput(e.target.value)} className="h-8 text-xs" title="Maximum walk distance allowed between transfers" />
+                    </div>
+                </div>
+
+                <div className="text-[11px] text-slate-500">Keep transfer walks short to encourage riding over long walking connections.</div>
 
                 <div>
                     <Label className="text-xs font-semibold text-slate-600 mb-2 flex items-center"><Filter className="w-3 h-3 mr-1"/> Transport Modes</Label>
@@ -1095,6 +1272,7 @@ export function MapInterface() {
                             </Badge>
                         ))}
                     </div>
+                    <div className="text-[11px] text-slate-500 mt-2">Tap a mode to include or exclude it from the search. All available modes from your data will appear here.</div>
                 </div>
             </div>
           )}

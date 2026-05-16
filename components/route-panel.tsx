@@ -1,14 +1,16 @@
 "use client"
 
-import { X, Clock, Navigation, Share2, MapPin, Wallet } from "lucide-react"
+import { X, Clock, Navigation, Share2, MapPin, Wallet, ChevronLeft, ChevronRight, CheckCircle2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { useMemo } from "react"
+import { useMemo, useEffect, useState } from "react"
 
 export interface RouteStep {
   instruction: string
   location?: [number, number]
+  distance?: number
+  duration?: number
 }
 
 export interface RouteData {
@@ -28,6 +30,13 @@ interface RoutePanelProps {
 }
 
 export function RoutePanel({ route, onClose }: RoutePanelProps) {
+  const [navigationStarted, setNavigationStarted] = useState(false)
+  const [currentStepIndex, setCurrentStepIndex] = useState(0)
+  
+  useEffect(() => {
+    setNavigationStarted(false)
+    setCurrentStepIndex(0)
+  }, [route])
   
   const safeParse = (value: string | number | undefined): number => {
     if (value === undefined || value === null) return 0
@@ -35,12 +44,18 @@ export function RoutePanel({ route, onClose }: RoutePanelProps) {
     return isNaN(parsed) ? 0 : parsed
   }
 
-  const durationValue = Math.abs(safeParse(route.time) || safeParse(route.duration))
-  const distanceValue = Math.abs(safeParse(route.distance)) 
-  const fareValue = Math.abs(safeParse(route.fare?.regular))
+  const totalStepsDistance = route.steps.reduce((sum, step) => sum + safeParse(step.distance), 0)
+  const totalStepsDuration = route.steps.reduce((sum, step) => sum + safeParse(step.duration), 0)
+
+  const durationValue = Math.abs(
+    safeParse(route.duration) || safeParse(route.time) || totalStepsDuration
+  )
+  const distanceValue = Math.abs(
+    safeParse(route.distance) || totalStepsDistance
+  )
+  const fareValue = Math.max(11, Math.abs(safeParse(route.fare?.regular)))
 
   const formattedDuration = useMemo(() => {
-    // FIX: Apply Math.abs() directly to the value used in duration calculation
     const durationMins = Math.abs(durationValue);
     
     const hrs = Math.floor(durationMins / 60)
@@ -70,6 +85,69 @@ export function RoutePanel({ route, onClose }: RoutePanelProps) {
       minute: '2-digit' 
     })
   }, [durationValue])
+
+  const totalSteps = route.steps.length
+  const currentStep = route.steps[currentStepIndex]
+  const remainingSteps = route.steps.slice(currentStepIndex + 1)
+  const remainingDistance = remainingSteps.reduce((total, step) => total + (step.distance ?? 0), 0)
+  const remainingDuration = remainingSteps.reduce((total, step) => total + (step.duration ?? 0), 0)
+
+  const formattedRemainingDistance = remainingDistance >= 1 ? `${remainingDistance.toFixed(1)} km` : `${Math.round(remainingDistance * 1000)} m`
+  const formattedRemainingDuration = (() => {
+    const mins = Math.round(remainingDuration)
+    const hrs = Math.floor(mins / 60)
+    const rest = mins % 60
+    return hrs > 0 ? `${hrs} hr ${rest} min` : `${rest} min`
+  })()
+
+  const handleNextStep = () => {
+    if (currentStepIndex < totalSteps - 1) {
+      setCurrentStepIndex(currentStepIndex + 1)
+    }
+  }
+
+  const handlePrevStep = () => {
+    if (currentStepIndex > 0) {
+      setCurrentStepIndex(currentStepIndex - 1)
+    }
+  }
+
+  const handleToggleNavigation = () => {
+    setNavigationStarted(!navigationStarted)
+    if (!navigationStarted) setCurrentStepIndex(0)
+  }
+
+  const handleShare = async () => {
+    const routeText = `
+🚌 ${route.name}
+⏱️ ${formattedDuration}
+📍 ${formattedDistance}
+💰 ₱${fareValue}
+
+Steps:
+${route.steps.map((s, i) => `${i + 1}. ${s.instruction}`).join('\n')}
+
+Find your route at: lakbayan.app
+    `.trim()
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: `Route: ${route.name}`,
+          text: routeText,
+        })
+      } catch (err) {
+        console.log('Share failed:', err)
+      }
+    } else {
+      try {
+        await navigator.clipboard.writeText(routeText)
+        alert('Route copied to clipboard!')
+      } catch (err) {
+        console.error('Failed to copy:', err)
+      }
+    }
+  }
 
   return (
     <div className="fixed inset-x-0 bottom-0 md:top-24 md:right-6 md:left-auto md:bottom-6 md:w-96 z-40 flex flex-col md:h-[calc(100vh-8rem)] animate-in slide-in-from-bottom-10 fade-in duration-300">
@@ -127,34 +205,67 @@ export function RoutePanel({ route, onClose }: RoutePanelProps) {
               </div>
             </div>
           </div>
+
+          <div className="mt-4 rounded-3xl border border-slate-200 bg-slate-50 p-4">
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">{navigationStarted ? 'Navigation active' : 'Route preview'}</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-900">{navigationStarted ? `Step ${currentStepIndex + 1} of ${totalSteps}` : `${totalSteps} instructions`}</p>
+                </div>
+                <div className="rounded-full bg-slate-900 px-3 py-1 text-xs text-white font-semibold">{navigationStarted ? 'Live' : 'Ready'}</div>
+              </div>
+              {navigationStarted && (
+                <p className="text-sm text-slate-600">Current: {currentStep?.instruction}</p>
+              )}
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-3 text-xs text-slate-500">
+              <div className="rounded-2xl bg-white border border-slate-200 px-3 py-3">
+                <p className="text-slate-900 font-semibold">{formattedRemainingDuration}</p>
+                <p className="mt-1">Remaining time</p>
+              </div>
+              <div className="rounded-2xl bg-white border border-slate-200 px-3 py-3">
+                <p className="text-slate-900 font-semibold">{formattedRemainingDistance}</p>
+                <p className="mt-1">Remaining dist</p>
+              </div>
+            </div>
+          </div>
         </div>
 
         <ScrollArea className="flex-1 px-5 py-4">
-          <div className="space-y-0 relative pb-6">
+          <div className="space-y-3 relative pb-6">
             <div className="absolute left-[19px] top-4 bottom-4 w-[2px] bg-gradient-to-b from-green-500 via-slate-200 to-red-500" />
 
             {route.steps?.map((step, index) => {
               const isStart = index === 0;
               const isEnd = index === route.steps.length - 1;
               const isWalk = step.instruction.toLowerCase().includes('walk');
+              const isActive = navigationStarted && index === currentStepIndex;
+              const isCompleted = navigationStarted && index < currentStepIndex;
 
               return (
                 <div 
                   key={index}
-                  className="relative flex gap-4 p-3 rounded-xl transition-all duration-200"
+                  className={`relative flex gap-4 p-4 rounded-2xl border transition duration-200 ${isActive ? 'border-slate-900 bg-slate-900 text-white shadow-lg' : isCompleted ? 'border-slate-200 bg-slate-100 text-slate-700' : 'border-slate-100 bg-white text-slate-800'}`}
                 >
                   <div className={`relative z-10 w-10 h-10 flex items-center justify-center rounded-full shrink-0 border-[3px] border-white shadow-sm ${
-                    isStart ? 'bg-green-500 text-white' : 
-                    isEnd ? 'bg-red-500 text-white' : 
-                    'bg-slate-100 text-slate-500 transition-colors'
+                    isActive ? 'bg-white text-slate-900' : isStart ? 'bg-green-500 text-white' : isEnd ? 'bg-red-500 text-white' : 'bg-slate-100 text-slate-500'
                   }`}>
                     {isStart || isEnd ? <MapPin className="w-5 h-5 fill-current" /> : <span className="text-xs font-bold">{index + 1}</span>}
                   </div>
 
                   <div className="flex-1 py-1">
-                    <p className={`text-sm leading-snug ${isWalk ? 'text-slate-500 italic font-medium' : 'text-slate-800 font-semibold'}`}>
-                      {step.instruction}
-                    </p>
+                    <div className="flex items-start justify-between gap-3">
+                      <p className={`text-sm leading-snug ${isWalk ? 'italic' : 'font-semibold'}`}>
+                        {step.instruction}
+                      </p>
+                      {(step.distance !== undefined || step.duration !== undefined) && (
+                        <div className="text-right text-[11px] text-slate-500">
+                          {step.distance !== undefined && <div>{step.distance >= 1 ? `${step.distance.toFixed(1)} km` : `${Math.round(step.distance * 1000)} m`}</div>}
+                          {step.duration !== undefined && <div>{Math.round(step.duration)} min</div>}
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               )
@@ -162,13 +273,30 @@ export function RoutePanel({ route, onClose }: RoutePanelProps) {
           </div>
         </ScrollArea>
 
-        <div className="p-5 border-t border-slate-100 bg-white flex gap-3 shrink-0 pb-8 md:pb-5">
-          <Button className="flex-1 bg-slate-900 hover:bg-slate-800 text-white shadow-lg shadow-slate-200/50 h-12 rounded-xl text-base font-semibold" size="lg">
-            <Navigation className="w-4 h-4 mr-2" /> Start Navigation
-          </Button>
-          <Button variant="outline" size="icon" className="h-12 w-12 shrink-0 rounded-xl border-slate-200 hover:bg-slate-50 text-slate-600">
-            <Share2 className="w-5 h-5" />
-          </Button>
+        <div className="p-5 border-t border-slate-100 bg-white flex flex-col gap-3 shrink-0 pb-8 md:pb-5">
+          {navigationStarted ? (
+            <div className="grid grid-cols-3 gap-3">
+              <Button variant="outline" size="icon" className="h-12 w-full rounded-xl border-slate-200 hover:bg-slate-50 text-slate-600" onClick={handlePrevStep} disabled={currentStepIndex === 0}>
+                <ChevronLeft className="w-4 h-4" />
+              </Button>
+              <Button className="flex items-center justify-center gap-2 bg-slate-900 hover:bg-slate-800 text-white h-12 rounded-xl text-base font-semibold" onClick={handleNextStep} disabled={currentStepIndex === totalSteps - 1}>
+                <span>{currentStepIndex === totalSteps - 1 ? 'Finish' : 'Next Step'}</span>
+                <ChevronRight className="w-4 h-4" />
+              </Button>
+              <Button variant="outline" size="icon" className="h-12 w-full rounded-xl border-slate-200 hover:bg-slate-50 text-slate-600" onClick={handleToggleNavigation}>
+                <CheckCircle2 className="w-4 h-4" />
+              </Button>
+            </div>
+          ) : (
+            <div className="flex gap-3">
+              <Button className="flex-1 bg-slate-900 hover:bg-slate-800 text-white shadow-lg shadow-slate-200/50 h-12 rounded-xl text-base font-semibold" size="lg" onClick={handleToggleNavigation}>
+                <Navigation className="w-4 h-4 mr-2" /> Start Navigation
+              </Button>
+              <Button variant="outline" size="icon" className="h-12 w-12 shrink-0 rounded-xl border-slate-200 hover:bg-slate-50 text-slate-600" onClick={handleShare}>
+                <Share2 className="w-5 h-5" />
+              </Button>
+            </div>
+          )}
         </div>
 
       </div>
